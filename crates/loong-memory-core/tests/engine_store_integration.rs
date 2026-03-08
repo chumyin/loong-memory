@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use loong_memory_core::{
-    Action, AllowAllPolicy, AuditEventKind, AuditSink, DeterministicHashEmbedder, EngineConfig,
-    InMemoryAuditSink, LoongMemoryError, MemoryDeleteRequest, MemoryEngine, MemoryGetRequest,
-    MemoryPutRequest, RecallRequest, ScoreWeights, SqliteStore, StaticPolicy,
+    Action, AllowAllPolicy, AuditEventKind, AuditSink, DeterministicHashEmbedder,
+    EmbeddingProvider, EngineConfig, InMemoryAuditSink, LoongMemoryError, MemoryDeleteRequest,
+    MemoryEngine, MemoryGetRequest, MemoryPutRequest, RecallRequest, ScoreWeights, SqliteStore,
+    StaticPolicy,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -544,4 +545,58 @@ fn multilingual_cjk_recall_returns_relevant_record() {
     assert_eq!(hits.len(), 2);
     assert!(hits[0].record.content.contains("内存检索"));
     assert!(hits[0].lexical_score > 0.0);
+}
+
+#[test]
+fn vector_storage_uses_blob_and_reads_legacy_json_vectors() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("vector"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    let created = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "vector".to_owned(),
+                external_id: Some("v1".to_owned()),
+                content: "vector baseline rust".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open raw sqlite");
+    let kind: String = conn
+        .query_row(
+            "SELECT typeof(vector) FROM memory_vectors WHERE memory_id = ?1",
+            rusqlite::params![created.id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("vector type");
+    assert_eq!(kind, "blob");
+
+    let embedder = DeterministicHashEmbedder::new(128);
+    let vec = embedder.embed("vector baseline rust").expect("embed");
+    let legacy_json = serde_json::to_string(&vec).expect("serialize legacy json");
+    conn.execute(
+        "UPDATE memory_vectors SET vector = ?1 WHERE memory_id = ?2",
+        rusqlite::params![legacy_json, created.id.as_str()],
+    )
+    .expect("overwrite with legacy text vector");
+
+    let hits = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "vector".to_owned(),
+                query: "vector baseline rust".to_owned(),
+                limit: 1,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect("recall using legacy vector text");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].record.id, created.id);
 }

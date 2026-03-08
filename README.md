@@ -16,7 +16,9 @@ Phase 1 (Engine-first + CLI) is implemented:
   - transactional SQLite memory store
   - deterministic hash embedding provider with multilingual tokenization
   - hybrid recall (FTS + cosine similarity)
-  - policy enforcement and audit sink contracts
+  - policy enforcement (namespace + principal-scoped static rules)
+  - vector persistence as compact BLOB with legacy JSON read compatibility
+  - audit sink contracts
 - `loong-memory-cli`
   - `init`, `put`, `get`, `recall`, `delete`, `audit`
 
@@ -28,6 +30,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `docs/research/onecontext-reverse-engineering.md`: onecontext implementation analysis and extracted design lessons.
 - `docs/research/phase1-evaluation-2026-03-08.md`: deep evaluation, optimization decisions, and verification results.
 - `docs/research/phase1-evaluation-round2-2026-03-08.md`: multilingual retrieval hardening and recall-bound enforcement.
+- `docs/research/phase1-evaluation-round3-2026-03-08.md`: principal-scoped policy and vector BLOB compatibility hardening.
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start

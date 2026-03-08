@@ -102,9 +102,11 @@ OneContext concept -> loong-memory implementation:
 
 ## 6. Risks and Future Work
 
-- Current vector persistence is JSON text for portability; Phase 2 may move to compact binary format.
+- Vector persistence has migrated to compact BLOB with backward-compatible JSON-text
+  read path; next focus is scalable ANN/vector indexing.
 - Current lexical query builder intentionally sanitizes tokens; advanced query syntax needs guarded expansion.
-- Current policy is pluggable but default simple; richer multi-principal policy context is a next-phase requirement.
+- Current policy is pluggable with namespace and principal-scoped static allow-lists;
+  richer dynamic policy context (ABAC/RBAC/time constraints) is still a next-phase requirement.
 
 ## 7. Conclusion
 

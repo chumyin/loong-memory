@@ -41,7 +41,8 @@ Validation guardrails at this layer include:
 SQLite schema includes:
 
 - `memories`: canonical memory rows.
-- `memory_vectors`: serialized vector by memory ID.
+- `memory_vectors`: compact `f32` little-endian BLOB by memory ID
+  (legacy JSON-text vector rows are still read-compatible).
 - `memory_fts`: FTS5 lexical index.
 - `memory_audit`: durable audit events.
 
@@ -120,6 +121,8 @@ Current integration tests validate:
 - allow + operation audit coverage
 - selector and weight validation edge cases
 - recall upper-bound protection and multilingual CJK retrieval behavior
+- vector BLOB persistence plus legacy JSON-text vector read compatibility
+- principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
 
 Quality gates:

@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::str;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -88,7 +89,7 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS memory_vectors (
                 memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
                 dimension INTEGER NOT NULL,
-                vector TEXT NOT NULL
+                vector BLOB NOT NULL
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
@@ -204,8 +205,7 @@ impl SqliteStore {
         )
         .map_err(storage_err("insert fts index"))?;
 
-        let vector_json = serde_json::to_string(vector)
-            .map_err(|e| LoongMemoryError::Storage(format!("serialize vector: {e}")))?;
+        let vector_blob = encode_vector_blob(vector);
         conn.execute(
             r#"
             INSERT INTO memory_vectors(memory_id, dimension, vector)
@@ -214,7 +214,7 @@ impl SqliteStore {
                 dimension = excluded.dimension,
                 vector = excluded.vector
             "#,
-            params![memory_id, vector.len() as i64, vector_json],
+            params![memory_id, vector.len() as i64, vector_blob],
         )
         .map_err(storage_err("upsert vector row"))?;
 
@@ -263,10 +263,10 @@ impl SqliteStore {
             let id: String = row
                 .get(0)
                 .map_err(storage_err("read vector candidate memory_id"))?;
-            let vector_json: String = row.get(1).map_err(storage_err("read vector candidate"))?;
-            let candidate: Vec<f32> = serde_json::from_str(&vector_json).map_err(|e| {
-                LoongMemoryError::Storage(format!("parse stored vector for memory {id}: {e}"))
-            })?;
+            let value_ref = row
+                .get_ref(1)
+                .map_err(storage_err("read vector candidate value"))?;
+            let candidate = decode_vector_value(value_ref, &id)?;
             let cosine = cosine_similarity(query_vector, &candidate);
             let normalized = ((cosine + 1.0) / 2.0).clamp(0.0, 1.0);
             out.insert(id, normalized);
@@ -416,6 +416,59 @@ fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn encode_vector_blob(vector: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(vector.len() * 4);
+    for value in vector {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn decode_vector_blob(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(format!(
+            "invalid blob size {}, not divisible by 4",
+            bytes.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(out)
+}
+
+fn decode_vector_value(
+    value_ref: ValueRef<'_>,
+    memory_id: &str,
+) -> Result<Vec<f32>, LoongMemoryError> {
+    match value_ref {
+        ValueRef::Blob(bytes) => decode_vector_blob(bytes).map_err(|e| {
+            LoongMemoryError::Storage(format!(
+                "decode blob vector for memory {memory_id} failed: {e}"
+            ))
+        }),
+        ValueRef::Text(text_bytes) => {
+            let text = str::from_utf8(text_bytes).map_err(|e| {
+                LoongMemoryError::Storage(format!(
+                    "decode text vector utf8 for memory {memory_id} failed: {e}"
+                ))
+            })?;
+            serde_json::from_str::<Vec<f32>>(text).map_err(|e| {
+                LoongMemoryError::Storage(format!(
+                    "parse text vector json for memory {memory_id} failed: {e}"
+                ))
+            })
+        }
+        ValueRef::Null => Err(LoongMemoryError::Storage(format!(
+            "vector value for memory {memory_id} is null"
+        ))),
+        other => Err(LoongMemoryError::Storage(format!(
+            "vector value for memory {memory_id} has unsupported sqlite type: {other:?}"
+        ))),
+    }
 }
 
 fn storage_err(

@@ -30,7 +30,8 @@ impl PolicyEngine for AllowAllPolicy {
 
 #[derive(Debug, Default)]
 pub struct StaticPolicy {
-    allow: BTreeMap<String, BTreeSet<Action>>,
+    allow_namespace: BTreeMap<String, BTreeSet<Action>>,
+    allow_principal_namespace: BTreeMap<(String, String), BTreeSet<Action>>,
 }
 
 impl StaticPolicy {
@@ -39,8 +40,21 @@ impl StaticPolicy {
         namespace: impl Into<String>,
         actions: impl IntoIterator<Item = Action>,
     ) -> Self {
-        self.allow
+        self.allow_namespace
             .entry(namespace.into())
+            .or_default()
+            .extend(actions);
+        self
+    }
+
+    pub fn allow_principal_namespace_actions(
+        mut self,
+        principal: impl Into<String>,
+        namespace: impl Into<String>,
+        actions: impl IntoIterator<Item = Action>,
+    ) -> Self {
+        self.allow_principal_namespace
+            .entry((principal.into(), namespace.into()))
             .or_default()
             .extend(actions);
         self
@@ -48,9 +62,17 @@ impl StaticPolicy {
 }
 
 impl PolicyEngine for StaticPolicy {
-    fn decide(&self, _principal: &str, namespace: &str, action: Action) -> PolicyDecision {
+    fn decide(&self, principal: &str, namespace: &str, action: Action) -> PolicyDecision {
         if self
-            .allow
+            .allow_principal_namespace
+            .get(&(principal.to_owned(), namespace.to_owned()))
+            .map(|s| s.contains(&action))
+            .unwrap_or(false)
+        {
+            return PolicyDecision::Allow;
+        }
+        if self
+            .allow_namespace
             .get(namespace)
             .map(|s| s.contains(&action))
             .unwrap_or(false)
@@ -58,7 +80,7 @@ impl PolicyEngine for StaticPolicy {
             PolicyDecision::Allow
         } else {
             PolicyDecision::Deny(format!(
-                "namespace={namespace} action={action:?} not allowed"
+                "principal={principal} namespace={namespace} action={action:?} not allowed"
             ))
         }
     }

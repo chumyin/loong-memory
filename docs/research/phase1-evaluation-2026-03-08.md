@@ -82,18 +82,20 @@ Executed successfully:
 
 Current integration test totals:
 
-- `engine_store_integration`: 9 passed
+- `engine_store_integration`: 12 passed
 - `audit_sqlite_integration`: 3 passed
+- `policy_static_tests`: 2 passed
 
 ## 5. Residual Risks (Phase 1)
 
-- vector storage is JSON-text for portability, not compact binary.
-- recall vector candidate scan is bounded but still local-scan based.
-- policy model is intentionally minimal (trait-ready, not full ABAC/RBAC runtime).
+- vector storage has migrated to compact BLOB with legacy JSON compatibility,
+  but candidate recall is still bounded local-scan based.
+- policy model is still intentionally static (namespace/principal allow-list),
+  trait-ready but not a full ABAC/RBAC runtime.
 
 ## 6. Recommended Phase 2 Focus
 
 - daemonized service with authenticated transport
-- binary vector encoding migration (with backward compatibility path)
+- ANN/vector-index acceleration for large-scale recall paths
 - policy plugin packs and tenant quota/retention controls
 - benchmark suite for throughput/latency regression tracking
