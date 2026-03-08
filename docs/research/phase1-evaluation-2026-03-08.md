@@ -83,6 +83,7 @@ Executed successfully:
 Current integration test totals:
 
 - `engine_store_integration`: 14 passed
+- `sqlite_store_migration_integration`: 2 passed
 - `audit_sqlite_integration`: 3 passed
 - `policy_static_tests`: 2 passed
 

@@ -32,6 +32,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `docs/research/phase1-evaluation-round2-2026-03-08.md`: multilingual retrieval hardening and recall-bound enforcement.
 - `docs/research/phase1-evaluation-round3-2026-03-08.md`: principal-scoped policy and vector BLOB compatibility hardening.
 - `docs/research/phase1-evaluation-round4-2026-03-08.md`: vector integrity validation and corruption-resilient recall hardening.
+- `docs/research/phase1-evaluation-round5-2026-03-08.md`: startup migration v2 for legacy text vectors and migration resilience tests.
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start

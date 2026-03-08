@@ -46,7 +46,7 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LoongMemoryError> {
         let path_ref = path.as_ref().to_path_buf();
-        let conn = Connection::open(&path_ref).map_err(storage_err("open sqlite database"))?;
+        let mut conn = Connection::open(&path_ref).map_err(storage_err("open sqlite database"))?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(storage_err("set journal_mode=WAL"))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
@@ -111,11 +111,90 @@ impl SqliteStore {
             "#,
         )
         .map_err(storage_err("initialize schema"))?;
+        Self::apply_schema_migration_v2_legacy_text_vectors(&mut conn)?;
 
         Ok(Self {
             conn,
             _path: path_ref,
         })
+    }
+
+    fn is_schema_version_applied(
+        conn: &Connection,
+        version: i64,
+    ) -> Result<bool, LoongMemoryError> {
+        let applied = conn
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = ?1 LIMIT 1",
+                params![version],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(storage_err("query schema migration version"))?;
+        Ok(applied.is_some())
+    }
+
+    fn apply_schema_migration_v2_legacy_text_vectors(
+        conn: &mut Connection,
+    ) -> Result<(), LoongMemoryError> {
+        if Self::is_schema_version_applied(conn, 2)? {
+            return Ok(());
+        }
+
+        let tx = conn
+            .transaction()
+            .map_err(storage_err("start schema migration v2 transaction"))?;
+        let mut stmt = tx
+            .prepare(
+                r#"
+                SELECT memory_id, vector
+                FROM memory_vectors
+                WHERE typeof(vector) = 'text'
+                "#,
+            )
+            .map_err(storage_err("prepare schema migration v2 scan"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(storage_err("query schema migration v2 scan"))?;
+
+        let mut legacy_rows: Vec<(String, String)> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(storage_err("scan schema migration v2 rows"))?
+        {
+            let memory_id: String = row
+                .get(0)
+                .map_err(storage_err("read schema migration v2 memory_id"))?;
+            let vector_text: String = row
+                .get(1)
+                .map_err(storage_err("read schema migration v2 vector text"))?;
+            legacy_rows.push((memory_id, vector_text));
+        }
+        drop(rows);
+        drop(stmt);
+
+        for (memory_id, vector_text) in legacy_rows {
+            let Ok(vector) = serde_json::from_str::<Vec<f32>>(&vector_text) else {
+                continue;
+            };
+            if vector.is_empty() || !vector.iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            tx.execute(
+                "UPDATE memory_vectors SET dimension = ?1, vector = ?2 WHERE memory_id = ?3",
+                params![vector.len() as i64, encode_vector_blob(&vector), memory_id],
+            )
+            .map_err(storage_err("update schema migration v2 vector row"))?;
+        }
+
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, datetime('now'))",
+            [],
+        )
+        .map_err(storage_err("record schema migration v2"))?;
+        tx.commit()
+            .map_err(storage_err("commit schema migration v2 transaction"))?;
+        Ok(())
     }
 
     fn fetch_by_id_and_namespace(

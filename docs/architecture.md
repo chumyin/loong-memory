@@ -51,6 +51,8 @@ Store behavior:
 - Upsert by `(namespace, external_id)` when external ID is provided.
 - Strict selector semantics for get/delete (`id` XOR `external_id`).
 - Transactional update of row + vector + FTS index.
+- Schema migration `v2` auto-converts legacy JSON-text vectors to compact BLOB
+  on `SqliteStore::open` (invalid legacy rows are skipped safely).
 
 ### L3 Retrieval Layer (Hybrid Recall)
 
@@ -125,6 +127,7 @@ Current integration tests validate:
 - recall upper-bound protection and multilingual CJK retrieval behavior
 - vector BLOB persistence plus legacy JSON-text vector read compatibility
 - corrupted/non-finite vector row resilience in recall path
+- startup migration behavior for legacy text vectors (v2 marker path)
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
 
