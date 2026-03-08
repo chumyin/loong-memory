@@ -1,0 +1,23 @@
+[package]
+name = "loong-memory-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true
+rand.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+approx.workspace = true
