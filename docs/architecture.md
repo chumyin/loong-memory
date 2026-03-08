@@ -95,6 +95,8 @@ For each query:
 ## 4. Security Model
 
 - Policy gate is enforced before every operation.
+- Maintenance operations (`vector_health`, `vector_repair`) are executed through
+  engine-level policy checks and audit events, not direct CLI store bypass.
 - Namespace is mandatory at contract level and store query level.
 - Selector ambiguity (`id` + `external_id`) is rejected.
 - Audit captures deny and allow paths for traceability.

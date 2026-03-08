@@ -18,6 +18,7 @@ fn allowed_policy_for(namespace: &str) -> Arc<dyn loong_memory_core::PolicyEngin
             Action::Recall,
             Action::Delete,
             Action::AuditRead,
+            Action::Repair,
         ],
     ))
 }
@@ -599,6 +600,48 @@ fn vector_storage_uses_blob_and_reads_legacy_json_vectors() {
         .expect("recall using legacy vector text");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].record.id, created.id);
+}
+
+#[test]
+fn vector_health_and_repair_are_policy_gated() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let policy = Arc::new(
+        StaticPolicy::default().allow_namespace_actions("ops", [Action::AuditRead, Action::Put]),
+    );
+    let mut engine = build_engine(&db_path, policy, Arc::clone(&audit));
+    let ctx = loong_memory_core::OperationContext::new("ops-user");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ops".to_owned(),
+                external_id: Some("k1".to_owned()),
+                content: "ops row".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let report = engine
+        .vector_health(&ctx, "ops", 5)
+        .expect("vector health should be allowed");
+    assert_eq!(report.total_rows, 1);
+
+    let err = engine
+        .vector_repair(&ctx, "ops", 5, false)
+        .expect_err("vector repair should be denied without Action::Repair");
+    assert!(matches!(err, LoongMemoryError::PolicyDenied(_)));
+
+    let events = audit.snapshot();
+    assert!(events
+        .iter()
+        .any(|evt| evt.action == "vector_health" && matches!(evt.kind, AuditEventKind::Read)));
+    assert!(events
+        .iter()
+        .any(|evt| evt.action == "Repair" && matches!(evt.kind, AuditEventKind::Denied)));
 }
 
 #[test]

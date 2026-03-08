@@ -123,9 +123,11 @@ struct VectorHealthCommand {
     #[arg(long, default_value = "./loong-memory.db")]
     db: PathBuf,
     #[arg(long)]
-    namespace: Option<String>,
+    namespace: String,
     #[arg(long, default_value_t = 20)]
     invalid_sample_limit: usize,
+    #[arg(long, default_value = "cli-user")]
+    principal: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -133,11 +135,13 @@ struct VectorRepairCommand {
     #[arg(long, default_value = "./loong-memory.db")]
     db: PathBuf,
     #[arg(long)]
-    namespace: Option<String>,
+    namespace: String,
     #[arg(long, default_value_t = 20)]
     issue_sample_limit: usize,
     #[arg(long, default_value_t = false)]
     apply: bool,
+    #[arg(long, default_value = "cli-user")]
+    principal: String,
 }
 
 fn main() -> Result<()> {
@@ -250,17 +254,23 @@ fn handle_audit(cmd: AuditCommand) -> Result<()> {
 }
 
 fn handle_vector_health(cmd: VectorHealthCommand) -> Result<()> {
-    let store = SqliteStore::open(&cmd.db)
-        .with_context(|| format!("open sqlite store {}", cmd.db.display()))?;
-    let report = store.vector_health_report(cmd.namespace.as_deref(), cmd.invalid_sample_limit)?;
+    let engine = open_engine(&cmd.db)?;
+    let report = engine.vector_health(
+        &OperationContext::new(cmd.principal),
+        &cmd.namespace,
+        cmd.invalid_sample_limit,
+    )?;
     print_json(&report)
 }
 
 fn handle_vector_repair(cmd: VectorRepairCommand) -> Result<()> {
-    let mut store = SqliteStore::open(&cmd.db)
-        .with_context(|| format!("open sqlite store {}", cmd.db.display()))?;
-    let report =
-        store.vector_repair(cmd.namespace.as_deref(), cmd.issue_sample_limit, cmd.apply)?;
+    let mut engine = open_engine(&cmd.db)?;
+    let report = engine.vector_repair(
+        &OperationContext::new(cmd.principal),
+        &cmd.namespace,
+        cmd.issue_sample_limit,
+        cmd.apply,
+    )?;
     print_json(&report)
 }
 

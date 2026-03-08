@@ -35,6 +35,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `docs/research/phase1-evaluation-round5-2026-03-08.md`: startup migration v2 for legacy text vectors and migration resilience tests.
 - `docs/research/phase1-evaluation-round6-2026-03-08.md`: vector health diagnostics API/CLI and integrity observability tests.
 - `docs/research/phase1-evaluation-round7-2026-03-08.md`: vector repair API/CLI (`dry-run` + `apply`) and repair integrity tests.
+- `docs/research/phase1-evaluation-round8-2026-03-09.md`: maintenance command security hardening (policy/audit gated vector health/repair).
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start
@@ -72,10 +73,18 @@ cargo run -p loong-memory-cli -- recall \
 cargo run -p loong-memory-cli -- audit --db ./loong-memory.db --limit 20
 
 # 7) vector health diagnostics
-cargo run -p loong-memory-cli -- vector-health --db ./loong-memory.db --invalid-sample-limit 20
+cargo run -p loong-memory-cli -- vector-health \
+  --db ./loong-memory.db \
+  --namespace agent-demo \
+  --invalid-sample-limit 20 \
+  --principal operator
 
 # 8) vector repair (dry-run by default, add --apply to write changes)
-cargo run -p loong-memory-cli -- vector-repair --db ./loong-memory.db --issue-sample-limit 20
+cargo run -p loong-memory-cli -- vector-repair \
+  --db ./loong-memory.db \
+  --namespace agent-demo \
+  --issue-sample-limit 20 \
+  --principal operator
 ```
 
 ## Verification Gates

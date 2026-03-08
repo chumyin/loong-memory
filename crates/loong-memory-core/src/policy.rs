@@ -7,6 +7,7 @@ pub enum Action {
     Recall,
     Delete,
     AuditRead,
+    Repair,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -37,6 +37,27 @@ pub trait MemoryStore {
         req: &RecallRequest,
         embedder: &dyn EmbeddingProvider,
     ) -> Result<Vec<RecallHit>, LoongMemoryError>;
+
+    fn vector_health_report(
+        &self,
+        _namespace: &str,
+        _invalid_sample_limit: usize,
+    ) -> Result<VectorHealthReport, LoongMemoryError> {
+        Err(LoongMemoryError::NotImplemented(
+            "vector_health_report not implemented for this store",
+        ))
+    }
+
+    fn vector_repair(
+        &mut self,
+        _namespace: &str,
+        _issue_sample_limit: usize,
+        _apply: bool,
+    ) -> Result<VectorRepairReport, LoongMemoryError> {
+        Err(LoongMemoryError::NotImplemented(
+            "vector_repair not implemented for this store",
+        ))
+    }
 }
 
 pub struct SqliteStore {
@@ -1306,5 +1327,22 @@ impl MemoryStore for SqliteStore {
         });
         hits.truncate(req.limit);
         Ok(hits)
+    }
+
+    fn vector_health_report(
+        &self,
+        namespace: &str,
+        invalid_sample_limit: usize,
+    ) -> Result<VectorHealthReport, LoongMemoryError> {
+        self.vector_health_report(Some(namespace), invalid_sample_limit)
+    }
+
+    fn vector_repair(
+        &mut self,
+        namespace: &str,
+        issue_sample_limit: usize,
+        apply: bool,
+    ) -> Result<VectorRepairReport, LoongMemoryError> {
+        self.vector_repair(Some(namespace), issue_sample_limit, apply)
     }
 }

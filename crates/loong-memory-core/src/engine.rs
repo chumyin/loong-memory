@@ -13,7 +13,7 @@ use crate::{
         RecallRequest,
     },
     policy::{Action, PolicyDecision, PolicyEngine},
-    store::MemoryStore,
+    store::{MemoryStore, VectorHealthReport, VectorRepairReport},
 };
 
 #[derive(Debug, Clone)]
@@ -145,6 +145,61 @@ impl<S: MemoryStore> MemoryEngine<S> {
             "recall",
             AuditEventKind::Recall,
             json!({"hits": out.len()}),
+        );
+        Ok(out)
+    }
+
+    pub fn vector_health(
+        &self,
+        ctx: &OperationContext,
+        namespace: &str,
+        invalid_sample_limit: usize,
+    ) -> Result<VectorHealthReport, LoongMemoryError> {
+        self.validate_namespace(namespace)?;
+        self.enforce(ctx, namespace, Action::AuditRead)?;
+        let out = self
+            .store
+            .vector_health_report(namespace, invalid_sample_limit)?;
+        self.emit(
+            ctx,
+            namespace,
+            "vector_health",
+            AuditEventKind::Read,
+            json!({
+                "total_rows": out.total_rows,
+                "invalid_rows": out.invalid_rows
+            }),
+        );
+        Ok(out)
+    }
+
+    pub fn vector_repair(
+        &mut self,
+        ctx: &OperationContext,
+        namespace: &str,
+        issue_sample_limit: usize,
+        apply: bool,
+    ) -> Result<VectorRepairReport, LoongMemoryError> {
+        self.validate_namespace(namespace)?;
+        self.enforce(ctx, namespace, Action::Repair)?;
+        let out = self
+            .store
+            .vector_repair(namespace, issue_sample_limit, apply)?;
+        self.emit(
+            ctx,
+            namespace,
+            "vector_repair",
+            if apply {
+                AuditEventKind::Write
+            } else {
+                AuditEventKind::Read
+            },
+            json!({
+                "apply": apply,
+                "repairable_rows": out.repairable_rows,
+                "repaired_rows": out.repaired_rows,
+                "invalid_rows": out.invalid_rows
+            }),
         );
         Ok(out)
     }

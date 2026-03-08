@@ -83,6 +83,7 @@ Executed successfully:
 Current integration test totals:
 
 - `engine_store_integration`: 14 passed
+- `engine_store_integration`: 15 passed
 - `sqlite_store_migration_integration`: 2 passed
 - `vector_health_integration`: 2 passed
 - `vector_repair_integration`: 2 passed
