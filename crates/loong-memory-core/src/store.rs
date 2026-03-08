@@ -62,6 +62,25 @@ pub struct VectorHealthReport {
     pub invalid_samples: Vec<VectorHealthIssue>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorRepairIssue {
+    pub memory_id: String,
+    pub sqlite_type: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorRepairReport {
+    pub namespace: Option<String>,
+    pub apply: bool,
+    pub total_rows: usize,
+    pub repairable_rows: usize,
+    pub repaired_rows: usize,
+    pub unchanged_rows: usize,
+    pub invalid_rows: usize,
+    pub issues: Vec<VectorRepairIssue>,
+}
+
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LoongMemoryError> {
         let path_ref = path.as_ref().to_path_buf();
@@ -278,6 +297,168 @@ impl SqliteStore {
             apply_vector_health_row(&mut report, row, sample_limit)?;
         }
         Ok(report)
+    }
+
+    pub fn vector_repair(
+        &mut self,
+        namespace: Option<&str>,
+        issue_sample_limit: usize,
+        apply: bool,
+    ) -> Result<VectorRepairReport, LoongMemoryError> {
+        let rows = self.collect_vector_rows(namespace)?;
+        let sample_limit = issue_sample_limit.min(2_000);
+        let mut report = VectorRepairReport {
+            namespace: namespace.map(ToOwned::to_owned),
+            apply,
+            total_rows: rows.len(),
+            repairable_rows: 0,
+            repaired_rows: 0,
+            unchanged_rows: 0,
+            invalid_rows: 0,
+            issues: Vec::new(),
+        };
+
+        let mut repair_entries: Vec<VectorRepairEntry> = Vec::new();
+        for row in rows {
+            let sqlite_type = row.cell.sqlite_type_name();
+            let Ok(stored_dimension) = usize::try_from(row.raw_dimension) else {
+                report.invalid_rows += 1;
+                push_vector_repair_issue(
+                    &mut report,
+                    sample_limit,
+                    row.memory_id,
+                    sqlite_type,
+                    format!("invalid dimension value: {}", row.raw_dimension),
+                );
+                continue;
+            };
+            if stored_dimension == 0 {
+                report.invalid_rows += 1;
+                push_vector_repair_issue(
+                    &mut report,
+                    sample_limit,
+                    row.memory_id,
+                    sqlite_type,
+                    "dimension must be > 0".to_owned(),
+                );
+                continue;
+            }
+
+            let vector = match decode_vector_cell(&row.cell, &row.memory_id) {
+                Ok(v) => v,
+                Err(err) => {
+                    report.invalid_rows += 1;
+                    push_vector_repair_issue(
+                        &mut report,
+                        sample_limit,
+                        row.memory_id,
+                        sqlite_type,
+                        vector_health_reason(err),
+                    );
+                    continue;
+                }
+            };
+
+            if vector.is_empty() || !vector.iter().all(|v| v.is_finite()) {
+                report.invalid_rows += 1;
+                push_vector_repair_issue(
+                    &mut report,
+                    sample_limit,
+                    row.memory_id,
+                    sqlite_type,
+                    "vector payload is empty or non-finite".to_owned(),
+                );
+                continue;
+            }
+
+            let decoded_dimension = vector.len();
+            let needs_repair = match row.cell {
+                VectorCell::Text(_) => true,
+                VectorCell::Blob(_) => stored_dimension != decoded_dimension,
+                _ => false,
+            };
+
+            if needs_repair {
+                report.repairable_rows += 1;
+                repair_entries.push(VectorRepairEntry {
+                    memory_id: row.memory_id,
+                    dimension: decoded_dimension,
+                    vector_blob: encode_vector_blob(&vector),
+                });
+            } else {
+                report.unchanged_rows += 1;
+            }
+        }
+
+        if apply && !repair_entries.is_empty() {
+            let tx = self
+                .conn
+                .transaction()
+                .map_err(storage_err("start vector repair transaction"))?;
+            for entry in repair_entries {
+                tx.execute(
+                    "UPDATE memory_vectors SET dimension = ?1, vector = ?2 WHERE memory_id = ?3",
+                    params![entry.dimension as i64, entry.vector_blob, entry.memory_id],
+                )
+                .map_err(storage_err("update vector repair row"))?;
+                report.repaired_rows += 1;
+            }
+            tx.commit()
+                .map_err(storage_err("commit vector repair transaction"))?;
+        }
+
+        if !apply {
+            report.repaired_rows = 0;
+        }
+
+        Ok(report)
+    }
+
+    fn collect_vector_rows(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<VectorRowSnapshot>, LoongMemoryError> {
+        let mut out = Vec::new();
+        if let Some(ns) = namespace {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    r#"
+                    SELECT mv.memory_id, mv.dimension, mv.vector
+                    FROM memory_vectors mv
+                    JOIN memories m ON m.id = mv.memory_id
+                    WHERE m.namespace = ?1
+                    ORDER BY m.updated_at DESC
+                    "#,
+                )
+                .map_err(storage_err("prepare vector row scan by namespace"))?;
+            let mut rows = stmt
+                .query(params![ns])
+                .map_err(storage_err("query vector row scan by namespace"))?;
+            while let Some(row) = rows.next().map_err(storage_err("scan vector rows"))? {
+                out.push(read_vector_row_snapshot(row)?);
+            }
+            return Ok(out);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT mv.memory_id, mv.dimension, mv.vector
+                FROM memory_vectors mv
+                JOIN memories m ON m.id = mv.memory_id
+                ORDER BY m.updated_at DESC
+                "#,
+            )
+            .map_err(storage_err("prepare vector row scan all"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(storage_err("query vector row scan all"))?;
+        while let Some(row) = rows.next().map_err(storage_err("scan vector rows"))? {
+            out.push(read_vector_row_snapshot(row)?);
+        }
+        Ok(out)
     }
 
     fn fetch_by_id_and_namespace(
@@ -561,6 +742,41 @@ enum MemorySelector<'a> {
     ByExternalId(&'a str),
 }
 
+#[derive(Debug, Clone)]
+enum VectorCell {
+    Blob(Vec<u8>),
+    Text(Vec<u8>),
+    Null,
+    Integer(i64),
+    Real(f64),
+}
+
+impl VectorCell {
+    fn sqlite_type_name(&self) -> &'static str {
+        match self {
+            VectorCell::Blob(_) => "blob",
+            VectorCell::Text(_) => "text",
+            VectorCell::Null => "null",
+            VectorCell::Integer(_) => "integer",
+            VectorCell::Real(_) => "real",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VectorRowSnapshot {
+    memory_id: String,
+    raw_dimension: i64,
+    cell: VectorCell,
+}
+
+#[derive(Debug, Clone)]
+struct VectorRepairEntry {
+    memory_id: String,
+    dimension: usize,
+    vector_blob: Vec<u8>,
+}
+
 fn row_to_memory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     let created_at_raw: String = row.get("created_at")?;
     let updated_at_raw: String = row.get("updated_at")?;
@@ -625,31 +841,14 @@ fn decode_vector_value(
     memory_id: &str,
     expected_dimension: usize,
 ) -> Result<Vec<f32>, LoongMemoryError> {
-    let vector = match value_ref {
-        ValueRef::Blob(bytes) => decode_vector_blob(bytes).map_err(|e| {
-            LoongMemoryError::Storage(format!(
-                "decode blob vector for memory {memory_id} failed: {e}"
-            ))
-        }),
-        ValueRef::Text(text_bytes) => {
-            let text = str::from_utf8(text_bytes).map_err(|e| {
-                LoongMemoryError::Storage(format!(
-                    "decode text vector utf8 for memory {memory_id} failed: {e}"
-                ))
-            })?;
-            serde_json::from_str::<Vec<f32>>(text).map_err(|e| {
-                LoongMemoryError::Storage(format!(
-                    "parse text vector json for memory {memory_id} failed: {e}"
-                ))
-            })
-        }
-        ValueRef::Null => Err(LoongMemoryError::Storage(format!(
-            "vector value for memory {memory_id} is null"
-        ))),
-        other => Err(LoongMemoryError::Storage(format!(
-            "vector value for memory {memory_id} has unsupported sqlite type: {other:?}"
-        ))),
-    }?;
+    let cell = match value_ref {
+        ValueRef::Blob(bytes) => VectorCell::Blob(bytes.to_vec()),
+        ValueRef::Text(bytes) => VectorCell::Text(bytes.to_vec()),
+        ValueRef::Null => VectorCell::Null,
+        ValueRef::Integer(v) => VectorCell::Integer(v),
+        ValueRef::Real(v) => VectorCell::Real(v),
+    };
+    let vector = decode_vector_cell(&cell, memory_id)?;
 
     if vector.len() != expected_dimension {
         return Err(LoongMemoryError::Storage(format!(
@@ -666,6 +865,63 @@ fn decode_vector_value(
     Ok(vector)
 }
 
+fn read_vector_row_snapshot(
+    row: &rusqlite::Row<'_>,
+) -> Result<VectorRowSnapshot, LoongMemoryError> {
+    let memory_id: String = row
+        .get(0)
+        .map_err(storage_err("read vector snapshot memory_id"))?;
+    let raw_dimension: i64 = row
+        .get(1)
+        .map_err(storage_err("read vector snapshot dimension"))?;
+    let value_ref = row
+        .get_ref(2)
+        .map_err(storage_err("read vector snapshot value"))?;
+    let cell = match value_ref {
+        ValueRef::Blob(bytes) => VectorCell::Blob(bytes.to_vec()),
+        ValueRef::Text(bytes) => VectorCell::Text(bytes.to_vec()),
+        ValueRef::Null => VectorCell::Null,
+        ValueRef::Integer(v) => VectorCell::Integer(v),
+        ValueRef::Real(v) => VectorCell::Real(v),
+    };
+    Ok(VectorRowSnapshot {
+        memory_id,
+        raw_dimension,
+        cell,
+    })
+}
+
+fn decode_vector_cell(cell: &VectorCell, memory_id: &str) -> Result<Vec<f32>, LoongMemoryError> {
+    match cell {
+        VectorCell::Blob(bytes) => decode_vector_blob(bytes).map_err(|e| {
+            LoongMemoryError::Storage(format!(
+                "decode blob vector for memory {memory_id} failed: {e}"
+            ))
+        }),
+        VectorCell::Text(text_bytes) => {
+            let text = str::from_utf8(text_bytes).map_err(|e| {
+                LoongMemoryError::Storage(format!(
+                    "decode text vector utf8 for memory {memory_id} failed: {e}"
+                ))
+            })?;
+            serde_json::from_str::<Vec<f32>>(text).map_err(|e| {
+                LoongMemoryError::Storage(format!(
+                    "parse text vector json for memory {memory_id} failed: {e}"
+                ))
+            })
+        }
+        VectorCell::Null => Err(LoongMemoryError::Storage(format!(
+            "vector value for memory {memory_id} is null"
+        ))),
+        VectorCell::Integer(v) => Err(LoongMemoryError::Storage(format!(
+            "vector value for memory {memory_id} has unsupported sqlite type: integer({v})"
+        ))),
+        VectorCell::Real(v) => Err(LoongMemoryError::Storage(format!(
+            "vector value for memory {memory_id} has unsupported sqlite type: real({v})"
+        ))),
+    }
+}
+
 fn push_vector_issue_sample(
     report: &mut VectorHealthReport,
     sample_limit: usize,
@@ -677,6 +933,23 @@ fn push_vector_issue_sample(
         return;
     }
     report.invalid_samples.push(VectorHealthIssue {
+        memory_id,
+        sqlite_type: sqlite_type.to_owned(),
+        reason,
+    });
+}
+
+fn push_vector_repair_issue(
+    report: &mut VectorRepairReport,
+    sample_limit: usize,
+    memory_id: String,
+    sqlite_type: &str,
+    reason: String,
+) {
+    if report.issues.len() >= sample_limit {
+        return;
+    }
+    report.issues.push(VectorRepairIssue {
         memory_id,
         sqlite_type: sqlite_type.to_owned(),
         reason,

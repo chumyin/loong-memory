@@ -55,6 +55,8 @@ Store behavior:
   on `SqliteStore::open` (invalid legacy rows are skipped safely).
 - `vector_health_report(namespace, sample_limit)` provides diagnostic counts and
   sampled invalid-row reasons for operator observability.
+- `vector_repair(namespace, sample_limit, apply)` provides repair planning and
+  optional transactional apply for recoverable rows.
 
 ### L3 Retrieval Layer (Hybrid Recall)
 
@@ -131,6 +133,7 @@ Current integration tests validate:
 - corrupted/non-finite vector row resilience in recall path
 - startup migration behavior for legacy text vectors (v2 marker path)
 - vector health diagnostics over valid/invalid blob/text rows
+- vector repair workflow (`dry-run` planning + transactional `apply`)
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
 
