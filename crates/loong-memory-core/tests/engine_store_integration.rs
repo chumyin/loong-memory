@@ -600,3 +600,95 @@ fn vector_storage_uses_blob_and_reads_legacy_json_vectors() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].record.id, created.id);
 }
+
+#[test]
+fn recall_skips_corrupted_vector_blob_instead_of_failing() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("vector"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    let created = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "vector".to_owned(),
+                external_id: Some("bad-blob".to_owned()),
+                content: "resilient vector recall path".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open raw sqlite");
+    conn.execute(
+        "UPDATE memory_vectors SET vector = ?1 WHERE memory_id = ?2",
+        rusqlite::params![vec![0_u8, 1_u8, 2_u8], created.id.as_str()],
+    )
+    .expect("overwrite with malformed blob");
+
+    let hits = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "vector".to_owned(),
+                query: "resilient vector recall path".to_owned(),
+                limit: 1,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect("recall should not fail on malformed vector blob");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].record.id, created.id);
+    assert_eq!(hits[0].vector_score, 0.0);
+    assert!(hits[0].lexical_score > 0.0);
+}
+
+#[test]
+fn recall_skips_non_finite_vector_values() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("vector"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    let created = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "vector".to_owned(),
+                external_id: Some("nan-vec".to_owned()),
+                content: "non finite vector resilience".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open raw sqlite");
+    let nan_blob = vec![f32::NAN; 128]
+        .into_iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect::<Vec<u8>>();
+    conn.execute(
+        "UPDATE memory_vectors SET vector = ?1 WHERE memory_id = ?2",
+        rusqlite::params![nan_blob, created.id.as_str()],
+    )
+    .expect("overwrite with nan vector blob");
+
+    let hits = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "vector".to_owned(),
+                query: "non finite vector resilience".to_owned(),
+                limit: 1,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect("recall should not fail on nan vector blob");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].record.id, created.id);
+    assert_eq!(hits[0].vector_score, 0.0);
+    assert!(hits[0].lexical_score > 0.0);
+}

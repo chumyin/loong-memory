@@ -245,7 +245,7 @@ impl SqliteStore {
             .conn
             .prepare(
                 r#"
-                SELECT mv.memory_id, mv.vector
+                SELECT mv.memory_id, mv.dimension, mv.vector
                 FROM memory_vectors mv
                 JOIN memories m ON m.id = mv.memory_id
                 WHERE m.namespace = ?1
@@ -263,11 +263,29 @@ impl SqliteStore {
             let id: String = row
                 .get(0)
                 .map_err(storage_err("read vector candidate memory_id"))?;
+            let stored_dimension: i64 = row
+                .get(1)
+                .map_err(storage_err("read vector candidate dimension"))?;
+            let Ok(stored_dimension) = usize::try_from(stored_dimension) else {
+                continue;
+            };
+            if stored_dimension != query_vector.len() {
+                continue;
+            }
             let value_ref = row
-                .get_ref(1)
+                .get_ref(2)
                 .map_err(storage_err("read vector candidate value"))?;
-            let candidate = decode_vector_value(value_ref, &id)?;
+            let candidate = match decode_vector_value(value_ref, &id, stored_dimension) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if !candidate.iter().all(|v| v.is_finite()) {
+                continue;
+            }
             let cosine = cosine_similarity(query_vector, &candidate);
+            if !cosine.is_finite() {
+                continue;
+            }
             let normalized = ((cosine + 1.0) / 2.0).clamp(0.0, 1.0);
             out.insert(id, normalized);
         }
@@ -443,8 +461,9 @@ fn decode_vector_blob(bytes: &[u8]) -> Result<Vec<f32>, String> {
 fn decode_vector_value(
     value_ref: ValueRef<'_>,
     memory_id: &str,
+    expected_dimension: usize,
 ) -> Result<Vec<f32>, LoongMemoryError> {
-    match value_ref {
+    let vector = match value_ref {
         ValueRef::Blob(bytes) => decode_vector_blob(bytes).map_err(|e| {
             LoongMemoryError::Storage(format!(
                 "decode blob vector for memory {memory_id} failed: {e}"
@@ -468,7 +487,21 @@ fn decode_vector_value(
         other => Err(LoongMemoryError::Storage(format!(
             "vector value for memory {memory_id} has unsupported sqlite type: {other:?}"
         ))),
+    }?;
+
+    if vector.len() != expected_dimension {
+        return Err(LoongMemoryError::Storage(format!(
+            "vector dimension mismatch for memory {memory_id}: decoded={} expected={expected_dimension}",
+            vector.len()
+        )));
     }
+    if !vector.iter().all(|v| v.is_finite()) {
+        return Err(LoongMemoryError::Storage(format!(
+            "vector contains non-finite values for memory {memory_id}"
+        )));
+    }
+
+    Ok(vector)
 }
 
 fn storage_err(

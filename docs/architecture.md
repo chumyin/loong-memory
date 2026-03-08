@@ -60,6 +60,8 @@ For each query:
 - If FTS lexical candidates are empty, fallback lexical scoring uses bounded token-overlap
   over recent namespace rows (improves CJK/non-space language handling).
 - Vector candidate set via bounded scan + cosine similarity.
+- Vector candidates enforce dimension and finiteness checks; malformed rows are skipped
+  so single-row corruption does not fail entire recall.
 - Candidate union + weighted merge:
   - `hybrid = lexical_weight * lexical_score + vector_weight * vector_score`
 - Deterministic sort:
@@ -122,6 +124,7 @@ Current integration tests validate:
 - selector and weight validation edge cases
 - recall upper-bound protection and multilingual CJK retrieval behavior
 - vector BLOB persistence plus legacy JSON-text vector read compatibility
+- corrupted/non-finite vector row resilience in recall path
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
 
