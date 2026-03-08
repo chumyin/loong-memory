@@ -463,3 +463,85 @@ fn recall_limit_is_respected_with_many_rows() {
         assert!(window[0].hybrid_score >= window[1].hybrid_score);
     }
 }
+
+#[test]
+fn recall_rejects_excessive_limit() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("scale"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "scale".to_owned(),
+                external_id: Some("k1".to_owned()),
+                content: "baseline".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed");
+
+    let err = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "scale".to_owned(),
+                query: "baseline".to_owned(),
+                limit: 10_000,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect_err("too large limit should be rejected");
+    assert!(matches!(err, LoongMemoryError::Validation(_)));
+}
+
+#[test]
+fn multilingual_cjk_recall_returns_relevant_record() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("multi"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "multi".to_owned(),
+                external_id: Some("zh-1".to_owned()),
+                content: "这个系统支持内存检索与上下文管理".to_owned(),
+                metadata: json!({"lang":"zh"}),
+            },
+        )
+        .expect("seed zh");
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "multi".to_owned(),
+                external_id: Some("en-1".to_owned()),
+                content: "network timeout troubleshooting guide".to_owned(),
+                metadata: json!({"lang":"en"}),
+            },
+        )
+        .expect("seed en");
+
+    let hits = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "multi".to_owned(),
+                query: "内存检索".to_owned(),
+                limit: 2,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect("recall");
+
+    assert_eq!(hits.len(), 2);
+    assert!(hits[0].record.content.contains("内存检索"));
+    assert!(hits[0].lexical_score > 0.0);
+}

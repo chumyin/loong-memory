@@ -56,6 +56,8 @@ Store behavior:
 For each query:
 
 - Lexical candidate set via FTS5 `MATCH` + `bm25` ranking.
+- If FTS lexical candidates are empty, fallback lexical scoring uses bounded token-overlap
+  over recent namespace rows (improves CJK/non-space language handling).
 - Vector candidate set via bounded scan + cosine similarity.
 - Candidate union + weighted merge:
   - `hybrid = lexical_weight * lexical_score + vector_weight * vector_score`
@@ -93,6 +95,7 @@ For each query:
 - SQLite WAL mode for concurrent read/write workloads.
 - `busy_timeout` to absorb transient write contention.
 - FTS and vector candidate scans are bounded to avoid unbounded CPU.
+- recall request limit is capped at engine level (`max_recall_limit`).
 - Indexes:
   - `(namespace, updated_at DESC)`
   - `(namespace, external_id)` unique partial index
@@ -116,6 +119,7 @@ Current integration tests validate:
 - hybrid recall ranking behavior
 - allow + operation audit coverage
 - selector and weight validation edge cases
+- recall upper-bound protection and multilingual CJK retrieval behavior
 - audit SQLite persistence/filter/limit/error behavior
 
 Quality gates:

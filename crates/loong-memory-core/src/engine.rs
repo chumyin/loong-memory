@@ -23,6 +23,7 @@ pub struct EngineConfig {
     pub max_content_bytes: usize,
     pub max_metadata_bytes: usize,
     pub max_query_bytes: usize,
+    pub max_recall_limit: usize,
 }
 
 impl Default for EngineConfig {
@@ -33,6 +34,7 @@ impl Default for EngineConfig {
             max_content_bytes: 16 * 1024,
             max_metadata_bytes: 16 * 1024,
             max_query_bytes: 2048,
+            max_recall_limit: 128,
         }
     }
 }
@@ -209,6 +211,12 @@ impl<S: MemoryStore> MemoryEngine<S> {
         }
         if req.limit == 0 {
             return Err(LoongMemoryError::Validation("limit must be > 0".to_owned()));
+        }
+        if req.limit > self.config.max_recall_limit {
+            return Err(LoongMemoryError::Validation(format!(
+                "limit too large (max={})",
+                self.config.max_recall_limit
+            )));
         }
         if !req.weights.lexical.is_finite() || !req.weights.vector.is_finite() {
             return Err(LoongMemoryError::Validation(

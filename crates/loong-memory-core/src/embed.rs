@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::error::LoongMemoryError;
+use crate::tokenize::tokenize_terms;
 
 pub trait EmbeddingProvider: Send + Sync {
     fn dimension(&self) -> usize;
@@ -31,7 +32,7 @@ impl EmbeddingProvider for DeterministicHashEmbedder {
 
     fn embed(&self, text: &str) -> Result<Vec<f32>, LoongMemoryError> {
         let mut out = vec![0.0_f32; self.dim];
-        for token in text.split_whitespace() {
+        for token in tokenize_terms(text, 256) {
             let mut hasher = Sha256::new();
             hasher.update(token.as_bytes());
             let bytes = hasher.finalize();

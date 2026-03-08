@@ -14,7 +14,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 
 - `loong-memory-core`
   - transactional SQLite memory store
-  - deterministic hash embedding provider
+  - deterministic hash embedding provider with multilingual tokenization
   - hybrid recall (FTS + cosine similarity)
   - policy enforcement and audit sink contracts
 - `loong-memory-cli`
@@ -27,6 +27,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `docs/architecture.md`: architecture and data model details.
 - `docs/research/onecontext-reverse-engineering.md`: onecontext implementation analysis and extracted design lessons.
 - `docs/research/phase1-evaluation-2026-03-08.md`: deep evaluation, optimization decisions, and verification results.
+- `docs/research/phase1-evaluation-round2-2026-03-08.md`: multilingual retrieval hardening and recall-bound enforcement.
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start
@@ -81,6 +82,7 @@ cargo test --workspace
 - All actions emit auditable events (allow/deny + operation detail).
 - Store operations use transactions for consistency.
 - SQLite `busy_timeout` and WAL are enabled for concurrency resilience.
+- recall has an explicit upper bound (`max_recall_limit`) to prevent abusive scans.
 
 ## License
 

@@ -7,6 +7,7 @@ pub mod error;
 pub mod model;
 pub mod policy;
 pub mod store;
+pub(crate) mod tokenize;
 
 pub use audit::{
     AuditEvent, AuditEventKind, AuditSink, InMemoryAuditSink, SqliteAuditLog, SqliteAuditSink,

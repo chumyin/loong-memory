@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use crate::{
         MemoryDeleteRequest, MemoryGetRequest, MemoryPutRequest, MemoryRecord, RecallHit,
         RecallRequest,
     },
+    tokenize::tokenize_terms,
 };
 
 pub trait MemoryStore {
@@ -222,15 +223,8 @@ impl SqliteStore {
 
     fn build_fts_query(query: &str) -> Option<String> {
         let mut terms = Vec::new();
-        for token in query.split_whitespace().take(24) {
-            let filtered: String = token
-                .chars()
-                .filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
-                .collect();
-            if filtered.is_empty() {
-                continue;
-            }
-            let escaped = filtered.replace('"', "\"\"");
+        for token in tokenize_terms(query, 24) {
+            let escaped = token.replace('"', "\"\"");
             terms.push(format!("\"{escaped}\""));
         }
         if terms.is_empty() {
@@ -317,6 +311,64 @@ impl SqliteStore {
                 .map_err(storage_err("read lexical candidate memory_id"))?;
             let rank: f64 = row.get(1).unwrap_or(0.0);
             let score = (1.0 / (1.0 + rank.abs() as f32)).clamp(0.0, 1.0);
+            out.insert(memory_id, score);
+        }
+
+        if out.is_empty() {
+            return self.read_lexical_fallback_candidates(namespace, query, lexical_limit as usize);
+        }
+
+        Ok(out)
+    }
+
+    fn read_lexical_fallback_candidates(
+        &self,
+        namespace: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<HashMap<String, f32>, LoongMemoryError> {
+        let query_terms: HashSet<String> = tokenize_terms(query, 32).into_iter().collect();
+        if query_terms.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, content
+                FROM memories
+                WHERE namespace = ?1
+                ORDER BY updated_at DESC
+                LIMIT ?2
+                "#,
+            )
+            .map_err(storage_err("prepare lexical fallback query"))?;
+        let mut rows = stmt
+            .query(params![namespace, limit as i64])
+            .map_err(storage_err("query lexical fallback candidates"))?;
+
+        let mut out = HashMap::new();
+        while let Some(row) = rows
+            .next()
+            .map_err(storage_err("scan lexical fallback candidates"))?
+        {
+            let memory_id: String = row
+                .get(0)
+                .map_err(storage_err("read lexical fallback memory_id"))?;
+            let content: String = row
+                .get(1)
+                .map_err(storage_err("read lexical fallback content"))?;
+            let content_terms: HashSet<String> =
+                tokenize_terms(&content, 128).into_iter().collect();
+            if content_terms.is_empty() {
+                continue;
+            }
+            let overlap = query_terms.intersection(&content_terms).count();
+            if overlap == 0 {
+                continue;
+            }
+            let score = (overlap as f32 / query_terms.len() as f32).clamp(0.0, 1.0);
             out.insert(memory_id, score);
         }
 
