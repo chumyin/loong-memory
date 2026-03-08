@@ -53,6 +53,8 @@ Store behavior:
 - Transactional update of row + vector + FTS index.
 - Schema migration `v2` auto-converts legacy JSON-text vectors to compact BLOB
   on `SqliteStore::open` (invalid legacy rows are skipped safely).
+- `vector_health_report(namespace, sample_limit)` provides diagnostic counts and
+  sampled invalid-row reasons for operator observability.
 
 ### L3 Retrieval Layer (Hybrid Recall)
 
@@ -128,6 +130,7 @@ Current integration tests validate:
 - vector BLOB persistence plus legacy JSON-text vector read compatibility
 - corrupted/non-finite vector row resilience in recall path
 - startup migration behavior for legacy text vectors (v2 marker path)
+- vector health diagnostics over valid/invalid blob/text rows
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
 

@@ -20,4 +20,4 @@ pub use model::{
     RecallRequest, ScoreWeights,
 };
 pub use policy::{Action, AllowAllPolicy, PolicyDecision, PolicyEngine, StaticPolicy};
-pub use store::{MemoryStore, SqliteStore};
+pub use store::{MemoryStore, SqliteStore, VectorHealthIssue, VectorHealthReport};

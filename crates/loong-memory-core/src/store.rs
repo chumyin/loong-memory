@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, types::ValueRef, Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -41,6 +42,24 @@ pub trait MemoryStore {
 pub struct SqliteStore {
     conn: Connection,
     _path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorHealthIssue {
+    pub memory_id: String,
+    pub sqlite_type: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorHealthReport {
+    pub namespace: Option<String>,
+    pub total_rows: usize,
+    pub blob_rows: usize,
+    pub text_rows: usize,
+    pub valid_rows: usize,
+    pub invalid_rows: usize,
+    pub invalid_samples: Vec<VectorHealthIssue>,
 }
 
 impl SqliteStore {
@@ -195,6 +214,70 @@ impl SqliteStore {
         tx.commit()
             .map_err(storage_err("commit schema migration v2 transaction"))?;
         Ok(())
+    }
+
+    pub fn vector_health_report(
+        &self,
+        namespace: Option<&str>,
+        invalid_sample_limit: usize,
+    ) -> Result<VectorHealthReport, LoongMemoryError> {
+        let mut report = VectorHealthReport {
+            namespace: namespace.map(ToOwned::to_owned),
+            total_rows: 0,
+            blob_rows: 0,
+            text_rows: 0,
+            valid_rows: 0,
+            invalid_rows: 0,
+            invalid_samples: Vec::new(),
+        };
+
+        let sample_limit = invalid_sample_limit.min(2_000);
+        if let Some(ns) = namespace {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    r#"
+                    SELECT mv.memory_id, mv.dimension, mv.vector
+                    FROM memory_vectors mv
+                    JOIN memories m ON m.id = mv.memory_id
+                    WHERE m.namespace = ?1
+                    ORDER BY m.updated_at DESC
+                    "#,
+                )
+                .map_err(storage_err("prepare vector health query by namespace"))?;
+            let mut rows = stmt
+                .query(params![ns])
+                .map_err(storage_err("query vector health rows by namespace"))?;
+            while let Some(row) = rows
+                .next()
+                .map_err(storage_err("scan vector health rows"))?
+            {
+                apply_vector_health_row(&mut report, row, sample_limit)?;
+            }
+            return Ok(report);
+        }
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT mv.memory_id, mv.dimension, mv.vector
+                FROM memory_vectors mv
+                JOIN memories m ON m.id = mv.memory_id
+                ORDER BY m.updated_at DESC
+                "#,
+            )
+            .map_err(storage_err("prepare vector health query all"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(storage_err("query vector health rows all"))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(storage_err("scan vector health rows"))?
+        {
+            apply_vector_health_row(&mut report, row, sample_limit)?;
+        }
+        Ok(report)
     }
 
     fn fetch_by_id_and_namespace(
@@ -581,6 +664,105 @@ fn decode_vector_value(
     }
 
     Ok(vector)
+}
+
+fn push_vector_issue_sample(
+    report: &mut VectorHealthReport,
+    sample_limit: usize,
+    memory_id: String,
+    sqlite_type: &str,
+    reason: String,
+) {
+    if report.invalid_samples.len() >= sample_limit {
+        return;
+    }
+    report.invalid_samples.push(VectorHealthIssue {
+        memory_id,
+        sqlite_type: sqlite_type.to_owned(),
+        reason,
+    });
+}
+
+fn apply_vector_health_row(
+    report: &mut VectorHealthReport,
+    row: &rusqlite::Row<'_>,
+    sample_limit: usize,
+) -> Result<(), LoongMemoryError> {
+    let memory_id: String = row
+        .get(0)
+        .map_err(storage_err("read vector health memory_id"))?;
+    let raw_dimension: i64 = row
+        .get(1)
+        .map_err(storage_err("read vector health dimension"))?;
+    let value_ref = row
+        .get_ref(2)
+        .map_err(storage_err("read vector health value"))?;
+
+    report.total_rows += 1;
+
+    let sqlite_type = match value_ref {
+        ValueRef::Blob(_) => {
+            report.blob_rows += 1;
+            "blob"
+        }
+        ValueRef::Text(_) => {
+            report.text_rows += 1;
+            "text"
+        }
+        ValueRef::Null => "null",
+        ValueRef::Integer(_) => "integer",
+        ValueRef::Real(_) => "real",
+    };
+
+    let Ok(expected_dimension) = usize::try_from(raw_dimension) else {
+        report.invalid_rows += 1;
+        push_vector_issue_sample(
+            report,
+            sample_limit,
+            memory_id,
+            sqlite_type,
+            format!("invalid dimension value: {raw_dimension}"),
+        );
+        return Ok(());
+    };
+
+    if expected_dimension == 0 {
+        report.invalid_rows += 1;
+        push_vector_issue_sample(
+            report,
+            sample_limit,
+            memory_id,
+            sqlite_type,
+            "dimension must be > 0".to_owned(),
+        );
+        return Ok(());
+    }
+
+    match decode_vector_value(value_ref, &memory_id, expected_dimension) {
+        Ok(_) => report.valid_rows += 1,
+        Err(err) => {
+            report.invalid_rows += 1;
+            push_vector_issue_sample(
+                report,
+                sample_limit,
+                memory_id,
+                sqlite_type,
+                vector_health_reason(err),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn vector_health_reason(err: LoongMemoryError) -> String {
+    match err {
+        LoongMemoryError::Storage(msg)
+        | LoongMemoryError::Validation(msg)
+        | LoongMemoryError::PolicyDenied(msg)
+        | LoongMemoryError::Internal(msg) => msg,
+        LoongMemoryError::NotFound => "not found".to_owned(),
+        LoongMemoryError::NotImplemented(msg) => format!("not implemented: {msg}"),
+    }
 }
 
 fn storage_err(
