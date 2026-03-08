@@ -26,6 +26,7 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `crates/loong-memory-cli`: command-line operational entrypoint.
 - `docs/architecture.md`: architecture and data model details.
 - `docs/research/onecontext-reverse-engineering.md`: onecontext implementation analysis and extracted design lessons.
+- `docs/research/phase1-evaluation-2026-03-08.md`: deep evaluation, optimization decisions, and verification results.
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start

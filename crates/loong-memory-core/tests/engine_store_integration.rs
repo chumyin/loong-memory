@@ -299,3 +299,167 @@ fn audit_contains_allow_and_operation_events() {
         .iter()
         .any(|evt| matches!(evt.kind, AuditEventKind::Delete)));
 }
+
+#[test]
+fn selector_validation_rejects_id_and_external_id_together() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(
+        &db_path,
+        allowed_policy_for("ns-validation"),
+        Arc::clone(&audit),
+    );
+    let ctx = loong_memory_core::OperationContext::new("validator");
+
+    let _created = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ns-validation".to_owned(),
+                external_id: Some("e1".to_owned()),
+                content: "payload".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let get_err = engine
+        .get(
+            &ctx,
+            &MemoryGetRequest {
+                namespace: "ns-validation".to_owned(),
+                id: Some("x".to_owned()),
+                external_id: Some("e1".to_owned()),
+            },
+        )
+        .expect_err("get selector should be invalid");
+    assert!(matches!(get_err, LoongMemoryError::Validation(_)));
+
+    let delete_err = engine
+        .delete(
+            &ctx,
+            &MemoryDeleteRequest {
+                namespace: "ns-validation".to_owned(),
+                id: Some("x".to_owned()),
+                external_id: Some("e1".to_owned()),
+            },
+        )
+        .expect_err("delete selector should be invalid");
+    assert!(matches!(delete_err, LoongMemoryError::Validation(_)));
+}
+
+#[test]
+fn recall_validation_rejects_invalid_weights() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("ns-weight"), audit);
+    let ctx = loong_memory_core::OperationContext::new("validator");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ns-weight".to_owned(),
+                external_id: None,
+                content: "hello".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed");
+
+    let err = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "ns-weight".to_owned(),
+                query: "hello".to_owned(),
+                limit: 1,
+                weights: ScoreWeights {
+                    lexical: -1.0,
+                    vector: 1.0,
+                },
+            },
+        )
+        .expect_err("negative weight should be invalid");
+    assert!(matches!(err, LoongMemoryError::Validation(_)));
+
+    let err = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "ns-weight".to_owned(),
+                query: "hello".to_owned(),
+                limit: 1,
+                weights: ScoreWeights {
+                    lexical: 0.0,
+                    vector: 0.0,
+                },
+            },
+        )
+        .expect_err("zero-sum weights should be invalid");
+    assert!(matches!(err, LoongMemoryError::Validation(_)));
+}
+
+#[test]
+fn namespace_length_limit_is_enforced() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("x"), audit);
+    let ctx = loong_memory_core::OperationContext::new("validator");
+
+    let long_namespace = "n".repeat(300);
+    let err = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: long_namespace,
+                external_id: None,
+                content: "payload".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect_err("long namespace should be invalid");
+    assert!(matches!(err, LoongMemoryError::Validation(_)));
+}
+
+#[test]
+fn recall_limit_is_respected_with_many_rows() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("scale"), audit);
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    for idx in 0..200 {
+        engine
+            .put(
+                &ctx,
+                &MemoryPutRequest {
+                    namespace: "scale".to_owned(),
+                    external_id: Some(format!("key-{idx}")),
+                    content: format!("rust memory record index {idx}"),
+                    metadata: json!({ "idx": idx }),
+                },
+            )
+            .expect("bulk put");
+    }
+
+    let hits = engine
+        .recall(
+            &ctx,
+            &RecallRequest {
+                namespace: "scale".to_owned(),
+                query: "rust memory".to_owned(),
+                limit: 15,
+                weights: ScoreWeights::default(),
+            },
+        )
+        .expect("bulk recall");
+    assert_eq!(hits.len(), 15);
+    for window in hits.windows(2) {
+        assert!(window[0].hybrid_score >= window[1].hybrid_score);
+    }
+}

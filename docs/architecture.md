@@ -29,6 +29,13 @@ Core contracts in `loong-memory-core`:
 
 This keeps control-plane decisions outside storage internals.
 
+Validation guardrails at this layer include:
+
+- namespace / external-id size limits
+- content / metadata / query byte-size limits
+- selector consistency (`id` XOR `external_id`)
+- recall weight sanity (finite, non-negative, positive-sum)
+
 ### L2 Store Layer (`SqliteStore`)
 
 SQLite schema includes:
@@ -108,6 +115,8 @@ Current integration tests validate:
 - put/get/delete roundtrip and upsert semantics
 - hybrid recall ranking behavior
 - allow + operation audit coverage
+- selector and weight validation edge cases
+- audit SQLite persistence/filter/limit/error behavior
 
 Quality gates:
 

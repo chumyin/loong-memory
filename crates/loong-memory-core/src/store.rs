@@ -595,9 +595,23 @@ impl MemoryStore for SqliteStore {
         }
 
         let mut hits = Vec::new();
+        let mut fetch_stmt = self
+            .conn
+            .prepare(
+                r#"
+                SELECT id, namespace, external_id, content, metadata, content_hash, created_at, updated_at
+                FROM memories
+                WHERE namespace = ?1 AND id = ?2
+                LIMIT 1
+                "#,
+            )
+            .map_err(storage_err("prepare recall record fetch"))?;
         for id in candidate_ids {
-            let Some(record) = Self::fetch_by_id_and_namespace(&self.conn, &req.namespace, &id)?
-            else {
+            let record = fetch_stmt
+                .query_row(params![req.namespace, id.as_str()], row_to_memory_record)
+                .optional()
+                .map_err(storage_err("query recall record fetch"))?;
+            let Some(record) = record else {
                 continue;
             };
             let lexical = lexical_scores.get(&id).copied().unwrap_or(0.0);
