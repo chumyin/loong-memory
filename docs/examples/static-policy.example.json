@@ -1,0 +1,12 @@
+{
+  "namespace_actions": {
+    "shared-readonly": ["get", "recall"]
+  },
+  "principal_namespace_actions": [
+    {
+      "principal": "operator",
+      "namespace": "agent-demo",
+      "actions": ["put", "get", "recall", "delete", "audit_read", "repair"]
+    }
+  ]
+}

@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use loong_memory_core::{
     Action, AllowAllPolicy, AuditEventKind, AuditSink, DeterministicHashEmbedder,
     EmbeddingProvider, EngineConfig, InMemoryAuditSink, LoongMemoryError, MemoryDeleteRequest,
-    MemoryEngine, MemoryGetRequest, MemoryPutRequest, RecallRequest, ScoreWeights, SqliteStore,
-    StaticPolicy,
+    MemoryEngine, MemoryGetRequest, MemoryPutRequest, RecallRequest, ScoreWeights, SqliteAuditLog,
+    SqliteAuditSink, SqliteStore, StaticPolicy,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -32,6 +32,47 @@ fn build_engine(
     let embedder = Arc::new(DeterministicHashEmbedder::new(128));
     let audit_sink: Arc<dyn AuditSink> = audit;
     MemoryEngine::new(store, policy, embedder, audit_sink, EngineConfig::default())
+}
+
+fn build_sqlite_audit_engine(
+    db_path: &std::path::Path,
+    policy: Arc<dyn loong_memory_core::PolicyEngine>,
+) -> MemoryEngine<SqliteStore> {
+    let store = SqliteStore::open(db_path).expect("open sqlite");
+    let embedder = Arc::new(DeterministicHashEmbedder::new(128));
+    let audit_sink: Arc<dyn AuditSink> =
+        Arc::new(SqliteAuditSink::open(db_path).expect("open sqlite audit sink"));
+    MemoryEngine::new(store, policy, embedder, audit_sink, EngineConfig::default())
+}
+
+#[derive(Debug)]
+struct FailingAuditSink {
+    fail_on_call: usize,
+    calls: Mutex<usize>,
+}
+
+impl FailingAuditSink {
+    fn new(fail_on_call: usize) -> Self {
+        Self {
+            fail_on_call,
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+impl AuditSink for FailingAuditSink {
+    fn record(&self, _event: loong_memory_core::AuditEvent) -> Result<(), LoongMemoryError> {
+        let mut calls = self.calls.lock().map_err(|_| {
+            LoongMemoryError::Internal("failing audit sink lock poisoned".to_owned())
+        })?;
+        *calls += 1;
+        if *calls == self.fail_on_call {
+            return Err(LoongMemoryError::Storage(
+                "forced audit sink failure".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[test]
@@ -181,6 +222,49 @@ fn policy_deny_blocks_write_and_emits_denied_audit() {
             .any(|evt| matches!(evt.kind, AuditEventKind::Denied)),
         "expected at least one denied audit event"
     );
+}
+
+#[test]
+fn put_surfaces_post_write_audit_failure() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let policy = Arc::new(AllowAllPolicy);
+    let audit_sink: Arc<dyn AuditSink> = Arc::new(FailingAuditSink::new(2));
+    let store = SqliteStore::open(&db_path).expect("open sqlite");
+    let embedder = Arc::new(DeterministicHashEmbedder::new(128));
+    let mut engine =
+        MemoryEngine::new(store, policy, embedder, audit_sink, EngineConfig::default());
+    let ctx = loong_memory_core::OperationContext::new("tester");
+
+    let err = engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "agent-a".to_owned(),
+                external_id: Some("profile".to_owned()),
+                content: "Alice likes rust systems programming".to_owned(),
+                metadata: json!({"source":"seed"}),
+            },
+        )
+        .expect_err("audit failure should be surfaced");
+    assert!(matches!(err, LoongMemoryError::Storage(_)));
+
+    let verify = build_engine(
+        &db_path,
+        Arc::new(AllowAllPolicy),
+        Arc::new(InMemoryAuditSink::default()),
+    );
+    let stored = verify
+        .get(
+            &ctx,
+            &MemoryGetRequest {
+                namespace: "agent-a".to_owned(),
+                id: None,
+                external_id: Some("profile".to_owned()),
+            },
+        )
+        .expect("write committed before audit failure surfaced");
+    assert_eq!(stored.content, "Alice likes rust systems programming");
 }
 
 #[test]
@@ -734,4 +818,102 @@ fn recall_skips_non_finite_vector_values() {
     assert_eq!(hits[0].record.id, created.id);
     assert_eq!(hits[0].vector_score, 0.0);
     assert!(hits[0].lexical_score > 0.0);
+}
+
+#[test]
+fn audit_read_without_reader_is_not_implemented() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let audit = Arc::new(InMemoryAuditSink::default());
+    let mut engine = build_engine(&db_path, allowed_policy_for("ops"), audit);
+    let ctx = loong_memory_core::OperationContext::new("ops-user");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ops".to_owned(),
+                external_id: Some("k1".to_owned()),
+                content: "seed audit row".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let err = engine
+        .audit_events(&ctx, "ops", 10)
+        .expect_err("audit events require a configured reader");
+    assert!(matches!(err, LoongMemoryError::NotImplemented(_)));
+}
+
+#[test]
+fn audit_read_is_policy_gated_and_emits_denied_event() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let policy = Arc::new(StaticPolicy::default().allow_namespace_actions("ops", [Action::Put]));
+    let mut engine = build_sqlite_audit_engine(&db_path, policy);
+    let ctx = loong_memory_core::OperationContext::new("ops-user");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ops".to_owned(),
+                external_id: Some("k1".to_owned()),
+                content: "seed audit row".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let err = engine
+        .audit_events(&ctx, "ops", 10)
+        .expect_err("audit read should be denied");
+    assert!(matches!(err, LoongMemoryError::PolicyDenied(_)));
+
+    let log = SqliteAuditLog::open(&db_path).expect("open sqlite audit log");
+    let events = log.list(Some("ops"), 20).expect("list audit log");
+    assert!(events
+        .iter()
+        .any(|evt| evt.action == "AuditRead" && matches!(evt.kind, AuditEventKind::Denied)));
+}
+
+#[test]
+fn audit_read_excludes_self_generated_audit_events_from_results() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("memory.db");
+    let policy = Arc::new(
+        StaticPolicy::default().allow_namespace_actions("ops", [Action::Put, Action::AuditRead]),
+    );
+    let mut engine = build_sqlite_audit_engine(&db_path, policy);
+    let ctx = loong_memory_core::OperationContext::new("ops-user");
+
+    engine
+        .put(
+            &ctx,
+            &MemoryPutRequest {
+                namespace: "ops".to_owned(),
+                external_id: Some("k1".to_owned()),
+                content: "seed audit row".to_owned(),
+                metadata: json!({}),
+            },
+        )
+        .expect("seed put");
+
+    let events = engine
+        .audit_events(&ctx, "ops", 20)
+        .expect("audit read should succeed");
+    assert!(!events.iter().any(|evt| evt.action == "AuditRead"));
+    assert!(!events.iter().any(|evt| evt.action == "audit_events"));
+    assert!(events.iter().any(|evt| evt.action == "Put"));
+    assert!(events.iter().any(|evt| evt.action == "put"));
+
+    let log = SqliteAuditLog::open(&db_path).expect("open sqlite audit log");
+    let persisted = log.list(Some("ops"), 20).expect("list audit log");
+    assert!(persisted
+        .iter()
+        .any(|evt| evt.action == "AuditRead" && matches!(evt.kind, AuditEventKind::Allowed)));
+    assert!(persisted
+        .iter()
+        .any(|evt| evt.action == "audit_events" && matches!(evt.kind, AuditEventKind::Read)));
 }

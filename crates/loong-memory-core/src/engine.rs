@@ -91,7 +91,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
             "put",
             AuditEventKind::Write,
             json!({"id": out.id}),
-        );
+        )?;
         Ok(out)
     }
 
@@ -109,7 +109,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
             "get",
             AuditEventKind::Read,
             json!({"id": out.id}),
-        );
+        )?;
         Ok(out)
     }
 
@@ -127,7 +127,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
             "delete",
             AuditEventKind::Delete,
             json!({"ok": true}),
-        );
+        )?;
         Ok(())
     }
 
@@ -145,7 +145,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
             "recall",
             AuditEventKind::Recall,
             json!({"hits": out.len()}),
-        );
+        )?;
         Ok(out)
     }
 
@@ -169,7 +169,54 @@ impl<S: MemoryStore> MemoryEngine<S> {
                 "total_rows": out.total_rows,
                 "invalid_rows": out.invalid_rows
             }),
-        );
+        )?;
+        Ok(out)
+    }
+
+    pub fn audit_events(
+        &self,
+        ctx: &OperationContext,
+        namespace: &str,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, LoongMemoryError> {
+        self.validate_namespace(namespace)?;
+        let out = match self
+            .policy
+            .decide(&ctx.principal, namespace, Action::AuditRead)
+        {
+            PolicyDecision::Allow => self.audit.list(namespace, limit)?,
+            PolicyDecision::Deny(reason) => {
+                if let Err(err) = self.emit(
+                    ctx,
+                    namespace,
+                    "AuditRead",
+                    AuditEventKind::Denied,
+                    json!({"reason": reason}),
+                ) {
+                    return Err(LoongMemoryError::Internal(format!(
+                        "emit denied audit event failed: {err}; original denial: {reason}"
+                    )));
+                }
+                return Err(LoongMemoryError::PolicyDenied(reason));
+            }
+        };
+        self.emit(
+            ctx,
+            namespace,
+            "AuditRead",
+            AuditEventKind::Allowed,
+            json!({}),
+        )?;
+        self.emit(
+            ctx,
+            namespace,
+            "audit_events",
+            AuditEventKind::Read,
+            json!({
+                "count": out.len(),
+                "limit": limit
+            }),
+        )?;
         Ok(out)
     }
 
@@ -200,7 +247,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
                 "repaired_rows": out.repaired_rows,
                 "invalid_rows": out.invalid_rows
             }),
-        );
+        )?;
         Ok(out)
     }
 
@@ -218,17 +265,21 @@ impl<S: MemoryStore> MemoryEngine<S> {
                     &format!("{action:?}"),
                     AuditEventKind::Allowed,
                     json!({}),
-                );
+                )?;
                 Ok(())
             }
             PolicyDecision::Deny(reason) => {
-                self.emit(
+                if let Err(err) = self.emit(
                     ctx,
                     namespace,
                     &format!("{action:?}"),
                     AuditEventKind::Denied,
                     json!({"reason": reason}),
-                );
+                ) {
+                    return Err(LoongMemoryError::Internal(format!(
+                        "emit denied audit event failed: {err}; original denial: {reason}"
+                    )));
+                }
                 Err(LoongMemoryError::PolicyDenied(reason))
             }
         }
@@ -358,7 +409,7 @@ impl<S: MemoryStore> MemoryEngine<S> {
         action: &str,
         kind: AuditEventKind,
         detail: serde_json::Value,
-    ) {
+    ) -> Result<(), LoongMemoryError> {
         self.audit.record(AuditEvent {
             event_id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
@@ -367,6 +418,6 @@ impl<S: MemoryStore> MemoryEngine<S> {
             action: action.to_owned(),
             kind,
             detail,
-        });
+        })
     }
 }

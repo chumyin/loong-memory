@@ -16,7 +16,7 @@ Core contracts in `loong-memory-core`:
 - `MemoryStore`: persistence and retrieval backend.
 - `EmbeddingProvider`: text to vector interface.
 - `PolicyEngine`: authorization decision boundary.
-- `AuditSink`: immutable operation trail sink.
+- `AuditSink`: fallible audit write boundary with optional namespace-scoped audit listing.
 
 ### L1 Control Layer (`MemoryEngine`)
 
@@ -28,6 +28,12 @@ Core contracts in `loong-memory-core`:
 4. Emit audit events for allow/deny and operation result.
 
 This keeps control-plane decisions outside storage internals.
+
+Audit-read behavior is a special case:
+
+- `audit_events(ctx, namespace, limit)` first evaluates authorization,
+  reads the existing namespace audit history, then emits its own allow/read
+  audit events afterward so returned history is not polluted by the read itself.
 
 Validation guardrails at this layer include:
 
@@ -57,6 +63,12 @@ Store behavior:
   sampled invalid-row reasons for operator observability.
 - `vector_repair(namespace, sample_limit, apply)` provides repair planning and
   optional transactional apply for recoverable rows.
+
+Audit behavior:
+
+- SQLite audit persistence is append-only (`INSERT`, not replace/update).
+- duplicate audit event IDs fail explicitly.
+- namespace-scoped audit listing is available through the SQLite audit sink/log.
 
 ### L3 Retrieval Layer (Hybrid Recall)
 
@@ -95,11 +107,18 @@ For each query:
 ## 4. Security Model
 
 - Policy gate is enforced before every operation.
+- CLI can load a JSON `StaticPolicyConfig` via `--policy-file`; without it,
+  the CLI preserves current local-operator ergonomics with `AllowAllPolicy`.
 - Maintenance operations (`vector_health`, `vector_repair`) are executed through
   engine-level policy checks and audit events, not direct CLI store bypass.
+- Audit reads are namespace-scoped and require `Action::AuditRead`.
 - Namespace is mandatory at contract level and store query level.
 - Selector ambiguity (`id` + `external_id`) is rejected.
 - Audit captures deny and allow paths for traceability.
+- Audit write failures are surfaced instead of being silently ignored.
+- Because store and audit persistence are still decoupled in Phase 1, a
+  post-operation audit failure can be returned after the store mutation has
+  already committed.
 
 ## 5. Performance Model
 

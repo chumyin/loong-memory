@@ -6,7 +6,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use loong_memory_core::{
     AllowAllPolicy, DeterministicHashEmbedder, EngineConfig, MemoryDeleteRequest, MemoryEngine,
     MemoryGetRequest, MemoryPutRequest, OperationContext, RecallRequest, ScoreWeights,
-    SqliteAuditLog, SqliteAuditSink, SqliteStore,
+    SqliteAuditSink, SqliteStore, StaticPolicy, StaticPolicyConfig,
 };
 use serde_json::{json, Value};
 
@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 #[command(name = "loong-memory")]
 #[command(about = "Rust-native memory engine CLI", version)]
 struct Cli {
+    #[arg(long, global = true)]
+    policy_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -113,9 +115,11 @@ struct AuditCommand {
     #[arg(long, default_value = "./loong-memory.db")]
     db: PathBuf,
     #[arg(long)]
-    namespace: Option<String>,
+    namespace: String,
     #[arg(long, default_value_t = 50)]
     limit: usize,
+    #[arg(long)]
+    principal: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -146,16 +150,17 @@ struct VectorRepairCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let policy_file = cli.policy_file.clone();
 
     match cli.command {
         Commands::Init(cmd) => handle_init(cmd),
-        Commands::Put(cmd) => handle_put(cmd),
-        Commands::Get(cmd) => handle_get(cmd),
-        Commands::Recall(cmd) => handle_recall(cmd),
-        Commands::Delete(cmd) => handle_delete(cmd),
-        Commands::Audit(cmd) => handle_audit(cmd),
-        Commands::VectorHealth(cmd) => handle_vector_health(cmd),
-        Commands::VectorRepair(cmd) => handle_vector_repair(cmd),
+        Commands::Put(cmd) => handle_put(cmd, policy_file.as_deref()),
+        Commands::Get(cmd) => handle_get(cmd, policy_file.as_deref()),
+        Commands::Recall(cmd) => handle_recall(cmd, policy_file.as_deref()),
+        Commands::Delete(cmd) => handle_delete(cmd, policy_file.as_deref()),
+        Commands::Audit(cmd) => handle_audit(cmd, policy_file.as_deref()),
+        Commands::VectorHealth(cmd) => handle_vector_health(cmd, policy_file.as_deref()),
+        Commands::VectorRepair(cmd) => handle_vector_repair(cmd, policy_file.as_deref()),
     }
 }
 
@@ -172,9 +177,9 @@ fn handle_init(cmd: InitCommand) -> Result<()> {
     }))
 }
 
-fn handle_put(cmd: PutCommand) -> Result<()> {
+fn handle_put(cmd: PutCommand, policy_file: Option<&Path>) -> Result<()> {
     let metadata = parse_metadata(&cmd.metadata)?;
-    let mut engine = open_engine(&cmd.db)?;
+    let mut engine = open_engine(&cmd.db, policy_file)?;
     let record = engine.put(
         &OperationContext::new(cmd.principal),
         &MemoryPutRequest {
@@ -187,8 +192,8 @@ fn handle_put(cmd: PutCommand) -> Result<()> {
     print_json(&record)
 }
 
-fn handle_get(cmd: GetCommand) -> Result<()> {
-    let engine = open_engine(&cmd.db)?;
+fn handle_get(cmd: GetCommand, policy_file: Option<&Path>) -> Result<()> {
+    let engine = open_engine(&cmd.db, policy_file)?;
     let record = engine.get(
         &OperationContext::new(cmd.principal),
         &MemoryGetRequest {
@@ -200,7 +205,7 @@ fn handle_get(cmd: GetCommand) -> Result<()> {
     print_json(&record)
 }
 
-fn handle_recall(cmd: RecallCommand) -> Result<()> {
+fn handle_recall(cmd: RecallCommand, policy_file: Option<&Path>) -> Result<()> {
     if cmd.limit == 0 {
         bail!("--limit must be greater than 0");
     }
@@ -209,7 +214,7 @@ fn handle_recall(cmd: RecallCommand) -> Result<()> {
         bail!("lexical/vector weights must sum to a positive value");
     }
 
-    let engine = open_engine(&cmd.db)?;
+    let engine = open_engine(&cmd.db, policy_file)?;
     let hits = engine.recall(
         &OperationContext::new(cmd.principal),
         &RecallRequest {
@@ -229,8 +234,8 @@ fn handle_recall(cmd: RecallCommand) -> Result<()> {
     }))
 }
 
-fn handle_delete(cmd: DeleteCommand) -> Result<()> {
-    let mut engine = open_engine(&cmd.db)?;
+fn handle_delete(cmd: DeleteCommand, policy_file: Option<&Path>) -> Result<()> {
+    let mut engine = open_engine(&cmd.db, policy_file)?;
     engine.delete(
         &OperationContext::new(cmd.principal),
         &MemoryDeleteRequest {
@@ -243,18 +248,21 @@ fn handle_delete(cmd: DeleteCommand) -> Result<()> {
     print_json(&json!({ "ok": true }))
 }
 
-fn handle_audit(cmd: AuditCommand) -> Result<()> {
-    let log = SqliteAuditLog::open(&cmd.db)
-        .with_context(|| format!("open sqlite audit log {}", cmd.db.display()))?;
-    let events = log.list(cmd.namespace.as_deref(), cmd.limit)?;
+fn handle_audit(cmd: AuditCommand, policy_file: Option<&Path>) -> Result<()> {
+    let engine = open_engine(&cmd.db, policy_file)?;
+    let events = engine.audit_events(
+        &OperationContext::new(cmd.principal),
+        &cmd.namespace,
+        cmd.limit,
+    )?;
     print_json(&json!({
         "count": events.len(),
         "events": events
     }))
 }
 
-fn handle_vector_health(cmd: VectorHealthCommand) -> Result<()> {
-    let engine = open_engine(&cmd.db)?;
+fn handle_vector_health(cmd: VectorHealthCommand, policy_file: Option<&Path>) -> Result<()> {
+    let engine = open_engine(&cmd.db, policy_file)?;
     let report = engine.vector_health(
         &OperationContext::new(cmd.principal),
         &cmd.namespace,
@@ -263,8 +271,8 @@ fn handle_vector_health(cmd: VectorHealthCommand) -> Result<()> {
     print_json(&report)
 }
 
-fn handle_vector_repair(cmd: VectorRepairCommand) -> Result<()> {
-    let mut engine = open_engine(&cmd.db)?;
+fn handle_vector_repair(cmd: VectorRepairCommand, policy_file: Option<&Path>) -> Result<()> {
+    let mut engine = open_engine(&cmd.db, policy_file)?;
     let report = engine.vector_repair(
         &OperationContext::new(cmd.principal),
         &cmd.namespace,
@@ -283,10 +291,10 @@ fn parse_metadata(metadata_raw: &str) -> Result<Value> {
     Ok(parsed)
 }
 
-fn open_engine(db_path: &Path) -> Result<MemoryEngine<SqliteStore>> {
+fn open_engine(db_path: &Path, policy_file: Option<&Path>) -> Result<MemoryEngine<SqliteStore>> {
     let store = SqliteStore::open(db_path)
         .with_context(|| format!("open sqlite store {}", db_path.display()))?;
-    let policy = Arc::new(AllowAllPolicy);
+    let policy = load_policy(policy_file)?;
     let embedder = Arc::new(DeterministicHashEmbedder::default());
     let audit = Arc::new(SqliteAuditSink::open(db_path)?);
 
@@ -297,6 +305,19 @@ fn open_engine(db_path: &Path) -> Result<MemoryEngine<SqliteStore>> {
         audit,
         EngineConfig::default(),
     ))
+}
+
+fn load_policy(policy_file: Option<&Path>) -> Result<Arc<dyn loong_memory_core::PolicyEngine>> {
+    match policy_file {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("read policy file {}", path.display()))?;
+            let config: StaticPolicyConfig = serde_json::from_str(&raw)
+                .with_context(|| format!("parse policy file {}", path.display()))?;
+            Ok(Arc::new(StaticPolicy::from_config(config)))
+        }
+        None => Ok(Arc::new(AllowAllPolicy)),
+    }
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<()> {

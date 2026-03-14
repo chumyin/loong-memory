@@ -61,7 +61,13 @@ impl FromStr for AuditEventKind {
 }
 
 pub trait AuditSink: Send + Sync {
-    fn record(&self, event: AuditEvent);
+    fn record(&self, event: AuditEvent) -> Result<(), LoongMemoryError>;
+
+    fn list(&self, _namespace: &str, _limit: usize) -> Result<Vec<AuditEvent>, LoongMemoryError> {
+        Err(LoongMemoryError::NotImplemented(
+            "audit event listing not implemented for this sink",
+        ))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -76,10 +82,13 @@ impl InMemoryAuditSink {
 }
 
 impl AuditSink for InMemoryAuditSink {
-    fn record(&self, event: AuditEvent) {
-        if let Ok(mut guard) = self.events.lock() {
-            guard.push(event);
-        }
+    fn record(&self, event: AuditEvent) -> Result<(), LoongMemoryError> {
+        let mut guard = self
+            .events
+            .lock()
+            .map_err(|_| LoongMemoryError::Internal("in-memory audit lock poisoned".to_owned()))?;
+        guard.push(event);
+        Ok(())
     }
 }
 
@@ -134,28 +143,39 @@ impl SqliteAuditSink {
 }
 
 impl AuditSink for SqliteAuditSink {
-    fn record(&self, event: AuditEvent) {
-        let Ok(detail) = serde_json::to_string(&event.detail) else {
-            return;
-        };
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                r#"
-                INSERT OR REPLACE INTO memory_audit (
-                    event_id, timestamp, principal, namespace, action, kind, detail
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                "#,
-                params![
-                    event.event_id,
-                    event.timestamp.to_rfc3339(),
-                    event.principal,
-                    event.namespace,
-                    event.action,
-                    event.kind.as_str(),
-                    detail
-                ],
-            );
-        }
+    fn record(&self, event: AuditEvent) -> Result<(), LoongMemoryError> {
+        let detail = serde_json::to_string(&event.detail)
+            .map_err(|e| LoongMemoryError::Internal(format!("serialize audit detail json: {e}")))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| LoongMemoryError::Internal("sqlite audit lock poisoned".to_owned()))?;
+        conn.execute(
+            r#"
+            INSERT INTO memory_audit (
+                event_id, timestamp, principal, namespace, action, kind, detail
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                event.event_id,
+                event.timestamp.to_rfc3339(),
+                event.principal,
+                event.namespace,
+                event.action,
+                event.kind.as_str(),
+                detail
+            ],
+        )
+        .map_err(|e| LoongMemoryError::Storage(format!("insert audit row: {e}")))?;
+        Ok(())
+    }
+
+    fn list(&self, namespace: &str, limit: usize) -> Result<Vec<AuditEvent>, LoongMemoryError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| LoongMemoryError::Internal("sqlite audit lock poisoned".to_owned()))?;
+        list_audit_rows(&conn, Some(namespace), limit)
     }
 }
 
@@ -175,56 +195,7 @@ impl SqliteAuditLog {
         namespace: Option<&str>,
         limit: usize,
     ) -> Result<Vec<AuditEvent>, LoongMemoryError> {
-        let limit = limit.clamp(1, 2_000) as i64;
-        let mut out = Vec::new();
-
-        if let Some(ns) = namespace {
-            let mut stmt = self
-                .conn
-                .prepare(
-                    r#"
-                    SELECT event_id, timestamp, principal, namespace, action, kind, detail
-                    FROM memory_audit
-                    WHERE namespace = ?1
-                    ORDER BY timestamp DESC
-                    LIMIT ?2
-                    "#,
-                )
-                .map_err(|e| LoongMemoryError::Storage(format!("prepare audit query: {e}")))?;
-            let mut rows = stmt
-                .query(params![ns, limit])
-                .map_err(|e| LoongMemoryError::Storage(format!("query audit rows: {e}")))?;
-            while let Some(row) = rows
-                .next()
-                .map_err(|e| LoongMemoryError::Storage(format!("scan audit rows: {e}")))?
-            {
-                out.push(parse_audit_row(row)?);
-            }
-            return Ok(out);
-        }
-
-        let mut stmt = self
-            .conn
-            .prepare(
-                r#"
-                SELECT event_id, timestamp, principal, namespace, action, kind, detail
-                FROM memory_audit
-                ORDER BY timestamp DESC
-                LIMIT ?1
-                "#,
-            )
-            .map_err(|e| LoongMemoryError::Storage(format!("prepare audit query: {e}")))?;
-        let mut rows = stmt
-            .query(params![limit])
-            .map_err(|e| LoongMemoryError::Storage(format!("query audit rows: {e}")))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| LoongMemoryError::Storage(format!("scan audit rows: {e}")))?
-        {
-            out.push(parse_audit_row(row)?);
-        }
-
-        Ok(out)
+        list_audit_rows(&self.conn, namespace, limit)
     }
 
     pub fn get_by_id(&self, event_id: &str) -> Result<Option<AuditEvent>, LoongMemoryError> {
@@ -249,6 +220,61 @@ impl SqliteAuditLog {
         };
         Ok(Some(parse_audit_row(row)?))
     }
+}
+
+fn list_audit_rows(
+    conn: &Connection,
+    namespace: Option<&str>,
+    limit: usize,
+) -> Result<Vec<AuditEvent>, LoongMemoryError> {
+    let limit = limit.clamp(1, 2_000) as i64;
+    let mut out = Vec::new();
+
+    if let Some(ns) = namespace {
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT event_id, timestamp, principal, namespace, action, kind, detail
+                FROM memory_audit
+                WHERE namespace = ?1
+                ORDER BY timestamp DESC
+                LIMIT ?2
+                "#,
+            )
+            .map_err(|e| LoongMemoryError::Storage(format!("prepare audit query: {e}")))?;
+        let mut rows = stmt
+            .query(params![ns, limit])
+            .map_err(|e| LoongMemoryError::Storage(format!("query audit rows: {e}")))?;
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| LoongMemoryError::Storage(format!("scan audit rows: {e}")))?
+        {
+            out.push(parse_audit_row(row)?);
+        }
+        return Ok(out);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT event_id, timestamp, principal, namespace, action, kind, detail
+            FROM memory_audit
+            ORDER BY timestamp DESC
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|e| LoongMemoryError::Storage(format!("prepare audit query: {e}")))?;
+    let mut rows = stmt
+        .query(params![limit])
+        .map_err(|e| LoongMemoryError::Storage(format!("query audit rows: {e}")))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| LoongMemoryError::Storage(format!("scan audit rows: {e}")))?
+    {
+        out.push(parse_audit_row(row)?);
+    }
+
+    Ok(out)
 }
 
 fn parse_audit_row(row: &rusqlite::Row<'_>) -> Result<AuditEvent, LoongMemoryError> {
