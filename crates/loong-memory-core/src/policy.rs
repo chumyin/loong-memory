@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Put,
     Get,
@@ -35,6 +38,21 @@ pub struct StaticPolicy {
     allow_principal_namespace: BTreeMap<(String, String), BTreeSet<Action>>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct StaticPolicyConfig {
+    #[serde(default)]
+    pub namespace_actions: BTreeMap<String, Vec<Action>>,
+    #[serde(default)]
+    pub principal_namespace_actions: Vec<PrincipalNamespaceActionsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrincipalNamespaceActionsConfig {
+    pub principal: String,
+    pub namespace: String,
+    pub actions: Vec<Action>,
+}
+
 impl StaticPolicy {
     pub fn allow_namespace_actions(
         mut self,
@@ -59,6 +77,21 @@ impl StaticPolicy {
             .or_default()
             .extend(actions);
         self
+    }
+
+    pub fn from_config(config: StaticPolicyConfig) -> Self {
+        let mut policy = Self::default();
+        for (namespace, actions) in config.namespace_actions {
+            policy = policy.allow_namespace_actions(namespace, actions);
+        }
+        for entry in config.principal_namespace_actions {
+            policy = policy.allow_principal_namespace_actions(
+                entry.principal,
+                entry.namespace,
+                entry.actions,
+            );
+        }
+        policy
     }
 }
 

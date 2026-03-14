@@ -19,7 +19,10 @@ pub use model::{
     MemoryDeleteRequest, MemoryGetRequest, MemoryPutRequest, MemoryRecord, RecallHit,
     RecallRequest, ScoreWeights,
 };
-pub use policy::{Action, AllowAllPolicy, PolicyDecision, PolicyEngine, StaticPolicy};
+pub use policy::{
+    Action, AllowAllPolicy, PolicyDecision, PolicyEngine, PrincipalNamespaceActionsConfig,
+    StaticPolicy, StaticPolicyConfig,
+};
 pub use store::{
     MemoryStore, SqliteStore, VectorHealthIssue, VectorHealthReport, VectorRepairIssue,
     VectorRepairReport,

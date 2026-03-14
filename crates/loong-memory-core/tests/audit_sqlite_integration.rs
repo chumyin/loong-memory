@@ -26,7 +26,8 @@ fn sqlite_audit_sink_persists_and_log_reads_back() {
             action: "put".to_owned(),
             kind: AuditEventKind::Write,
             detail: json!({ "idx": idx }),
-        });
+        })
+        .expect("record event");
     }
 
     let log = SqliteAuditLog::open(&db_path).expect("open log");
@@ -52,6 +53,39 @@ fn sqlite_audit_sink_persists_and_log_reads_back() {
 }
 
 #[test]
+fn sqlite_audit_sink_rejects_duplicate_event_ids() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("audit.db");
+
+    let sink = SqliteAuditSink::open(&db_path).expect("open sink");
+    let event = AuditEvent {
+        event_id: "dup-1".to_owned(),
+        timestamp: Utc::now(),
+        principal: "tester".to_owned(),
+        namespace: "alpha".to_owned(),
+        action: "put".to_owned(),
+        kind: AuditEventKind::Write,
+        detail: json!({ "rev": 1 }),
+    };
+
+    sink.record(event.clone()).expect("insert original event");
+    let err = sink
+        .record(AuditEvent {
+            detail: json!({ "rev": 2 }),
+            ..event
+        })
+        .expect_err("duplicate event ids should fail");
+    assert!(matches!(err, LoongMemoryError::Storage(_)));
+
+    let log = SqliteAuditLog::open(&db_path).expect("open log");
+    let stored = log
+        .get_by_id("dup-1")
+        .expect("get by id")
+        .expect("event exists");
+    assert_eq!(stored.detail, json!({ "rev": 1 }));
+}
+
+#[test]
 fn sqlite_audit_log_limit_is_clamped() {
     let dir = tempdir().expect("tempdir");
     let db_path = dir.path().join("audit.db");
@@ -66,7 +100,8 @@ fn sqlite_audit_log_limit_is_clamped() {
             action: "op".to_owned(),
             kind: AuditEventKind::Read,
             detail: json!({}),
-        });
+        })
+        .expect("record event");
     }
 
     let log = SqliteAuditLog::open(&db_path).expect("open log");
