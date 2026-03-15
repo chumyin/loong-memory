@@ -2,6 +2,7 @@
 members = [
   "crates/loong-memory-core",
   "crates/loong-memory-cli",
+  "crates/loong-memoryd",
 ]
 resolver = "2"
 
@@ -28,3 +29,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 tempfile = "3"
 approx = "0.5"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
