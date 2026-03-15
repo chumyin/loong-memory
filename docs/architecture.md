@@ -91,9 +91,12 @@ Phase 2 now starts with a minimal HTTP JSON daemon:
 
 - `GET /healthz`
 - `POST /v1/memories`
+- `DELETE /v1/memories`
 - `POST /v1/memories/get`
 - `POST /v1/recall`
 - `POST /v1/audit`
+- `POST /v1/vector-health`
+- `POST /v1/vector-repair`
 
 Transport behavior:
 
@@ -180,8 +183,9 @@ Current integration tests validate:
 - vector repair workflow (`dry-run` planning + transactional `apply`)
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
-- daemon health, principal enforcement, put/get roundtrip, recall, policy deny,
-  and audit-read behavior over HTTP
+- daemon health, readiness failure, principal enforcement, malformed JSON,
+  validation failures, delete, recall, audit, vector health/repair, and deny
+  behavior over HTTP
 
 Quality gates:
 

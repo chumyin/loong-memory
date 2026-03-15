@@ -29,9 +29,12 @@ minimal daemon surface:
   - standalone HTTP JSON daemon
   - `GET /healthz`
   - `POST /v1/memories`
+  - `DELETE /v1/memories`
   - `POST /v1/memories/get`
   - `POST /v1/recall`
   - `POST /v1/audit`
+  - `POST /v1/vector-health`
+  - `POST /v1/vector-repair`
   - per-request `MemoryEngine` construction on blocking workers
   - transport-level principal envelope via `x-loong-principal`
 
@@ -153,6 +156,34 @@ curl -X POST http://127.0.0.1:3000/v1/audit \
   -d '{
     "namespace": "agent-demo",
     "limit": 20
+  }'
+
+# 15) daemon delete
+curl -X DELETE http://127.0.0.1:3000/v1/memories \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "external_id": "profile"
+  }'
+
+# 16) daemon vector health
+curl -X POST http://127.0.0.1:3000/v1/vector-health \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "invalid_sample_limit": 20
+  }'
+
+# 17) daemon vector repair dry-run
+curl -X POST http://127.0.0.1:3000/v1/vector-repair \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "issue_sample_limit": 20,
+    "apply": false
   }'
 ```
 
