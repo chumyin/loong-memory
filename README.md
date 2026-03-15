@@ -10,7 +10,8 @@ It is designed around four non-negotiable goals:
 
 ## Current Status
 
-Phase 1 (Engine-first + CLI) is implemented:
+Phase 1 (Engine-first + CLI) is implemented, and Phase 2 has started with a
+minimal daemon surface:
 
 - `loong-memory-core`
   - transactional SQLite memory store
@@ -24,11 +25,21 @@ Phase 1 (Engine-first + CLI) is implemented:
   - `init`, `put`, `get`, `recall`, `delete`, `audit`, `vector-health`, `vector-repair`
   - global optional `--policy-file <path>` for CLI policy enforcement
   - namespace-scoped, policy-gated `audit` reads with explicit principal
+- `loong-memoryd`
+  - standalone HTTP JSON daemon
+  - `GET /healthz`
+  - `POST /v1/memories`
+  - `POST /v1/memories/get`
+  - `POST /v1/recall`
+  - `POST /v1/audit`
+  - per-request `MemoryEngine` construction on blocking workers
+  - transport-level principal envelope via `x-loong-principal`
 
 ## Repository Layout
 
 - `crates/loong-memory-core`: core contracts and engine implementation.
 - `crates/loong-memory-cli`: command-line operational entrypoint.
+- `crates/loong-memoryd`: standalone Phase 2 HTTP daemon.
 - `docs/architecture.md`: architecture and data model details.
 - `docs/examples/static-policy.example.json`: example JSON policy file for CLI enforcement.
 - `docs/research/onecontext-reverse-engineering.md`: onecontext implementation analysis and extracted design lessons.
@@ -41,8 +52,11 @@ Phase 1 (Engine-first + CLI) is implemented:
 - `docs/research/phase1-evaluation-round7-2026-03-08.md`: vector repair API/CLI (`dry-run` + `apply`) and repair integrity tests.
 - `docs/research/phase1-evaluation-round8-2026-03-09.md`: maintenance command security hardening (policy/audit gated vector health/repair).
 - `docs/research/phase1-evaluation-round9-2026-03-14.md`: CLI policy control-plane and audit hardening evaluation.
+- `docs/research/phase2-service-evaluation-2026-03-15.md`: minimal daemon transport evaluation and verification notes.
 - `docs/plans/2026-03-14-cli-policy-control-plane-design.md`: design for CLI policy/audit control-plane hardening.
 - `docs/plans/2026-03-14-cli-policy-control-plane.md`: implementation plan for CLI policy/audit control-plane hardening.
+- `docs/plans/2026-03-15-loong-memoryd-http-design.md`: design for the minimal daemon HTTP surface.
+- `docs/plans/2026-03-15-loong-memoryd-http.md`: implementation plan for the minimal daemon HTTP surface.
 - `docs/roadmap.md`: phased expansion plan.
 
 ## Quick Start
@@ -101,6 +115,45 @@ cargo run -p loong-memory-cli -- --policy-file ./policy.json vector-repair \
   --namespace agent-demo \
   --issue-sample-limit 20 \
   --principal operator
+
+# 10) start the daemon
+cargo run -p loong-memoryd -- \
+  --db ./loong-memory.db \
+  --listen-addr 127.0.0.1:3000 \
+  --policy-file ./policy.json
+
+# 11) health check (no principal required)
+curl http://127.0.0.1:3000/healthz
+
+# 12) daemon write
+curl -X POST http://127.0.0.1:3000/v1/memories \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "external_id": "profile",
+    "content": "Alice likes rust and sqlite",
+    "metadata": {"source": "daemon"}
+  }'
+
+# 13) daemon recall
+curl -X POST http://127.0.0.1:3000/v1/recall \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "query": "rust sqlite",
+    "limit": 3
+  }'
+
+# 14) daemon audit read
+curl -X POST http://127.0.0.1:3000/v1/audit \
+  -H 'content-type: application/json' \
+  -H 'x-loong-principal: operator' \
+  -d '{
+    "namespace": "agent-demo",
+    "limit": 20
+  }'
 ```
 
 ## Verification Gates
@@ -117,8 +170,10 @@ cargo test --workspace
 
 - Namespace is required in every operation, including `audit`.
 - CLI defaults to `AllowAllPolicy` when `--policy-file` is omitted.
+- `loong-memoryd` also defaults to `AllowAllPolicy` when `--policy-file` is omitted.
 - Policy is checked before store access.
 - Static JSON policy files can grant namespace-level and principal+namespace actions.
+- HTTP service routes require `x-loong-principal` on protected operations.
 - All actions emit auditable events (allow/deny + operation detail).
 - Audit reads are policy-gated and returned history excludes self-generated audit-read events.
 - Audit persistence surfaces write failures instead of silently dropping events.

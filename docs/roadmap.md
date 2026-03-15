@@ -7,12 +7,19 @@
 - CLI for operational CRUD and audit inspection
 - baseline integration tests and strict lint gates
 
-## Phase 2: Transport + SDK Surface
+## Phase 2 (Started): Transport + SDK Surface
 
-- standalone daemon process (`loong-memoryd`)
-- gRPC/HTTP APIs with authn/authz envelope
+Implemented:
+
+- standalone daemon process bootstrap (`loong-memoryd`)
+- minimal HTTP JSON API with principal header envelope
+- structured health checks
+
+Remaining:
+
+- broader HTTP/gRPC surface
 - Rust + TypeScript SDK clients
-- metrics/tracing integration and structured health checks
+- metrics/tracing integration
 
 ## Phase 3: Scalability and Isolation Hardening
 

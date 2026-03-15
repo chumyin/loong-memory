@@ -1,4 +1,4 @@
-# loong-memory Architecture (Phase 1)
+# loong-memory Architecture (Phase 1 + Phase 2 Bootstrap)
 
 ## 1. Design Goals
 
@@ -85,6 +85,27 @@ For each query:
 - Deterministic sort:
   - `hybrid_score DESC`, `updated_at DESC`, `id ASC`.
 
+### L4 Service Layer (`loong-memoryd`)
+
+Phase 2 now starts with a minimal HTTP JSON daemon:
+
+- `GET /healthz`
+- `POST /v1/memories`
+- `POST /v1/memories/get`
+- `POST /v1/recall`
+- `POST /v1/audit`
+
+Transport behavior:
+
+- protected routes require `x-loong-principal`
+- request bodies map closely to existing engine request types
+- each request creates a fresh `MemoryEngine` against the configured SQLite path
+- synchronous SQLite/engine work is executed inside `tokio::task::spawn_blocking`
+- errors are mapped into structured HTTP JSON responses
+
+This keeps the daemon thin. The control-plane rules still live in
+`MemoryEngine`, not in the transport handlers.
+
 ## 3. Data Model
 
 ### MemoryRecord
@@ -109,6 +130,8 @@ For each query:
 - Policy gate is enforced before every operation.
 - CLI can load a JSON `StaticPolicyConfig` via `--policy-file`; without it,
   the CLI preserves current local-operator ergonomics with `AllowAllPolicy`.
+- `loong-memoryd` can load the same JSON `StaticPolicyConfig`; protected routes
+  require `x-loong-principal` so transport requests carry an explicit principal.
 - Maintenance operations (`vector_health`, `vector_repair`) are executed through
   engine-level policy checks and audit events, not direct CLI store bypass.
 - Audit reads are namespace-scoped and require `Action::AuditRead`.
@@ -157,6 +180,8 @@ Current integration tests validate:
 - vector repair workflow (`dry-run` planning + transactional `apply`)
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
+- daemon health, principal enforcement, put/get roundtrip, recall, policy deny,
+  and audit-read behavior over HTTP
 
 Quality gates:
 
