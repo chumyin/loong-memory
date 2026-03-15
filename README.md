@@ -36,7 +36,9 @@ minimal daemon surface:
   - `POST /v1/vector-health`
   - `POST /v1/vector-repair`
   - per-request `MemoryEngine` construction on blocking workers
-  - transport-level principal envelope via `x-loong-principal`
+  - trusted-header mode via `x-loong-principal` for local operator workflows
+  - optional static bearer-token auth via `--auth-file <path>`
+  - `/healthz` reports both `policy_mode` and `auth_mode`
 
 ## Repository Layout
 
@@ -44,6 +46,7 @@ minimal daemon surface:
 - `crates/loong-memory-cli`: command-line operational entrypoint.
 - `crates/loong-memoryd`: standalone Phase 2 HTTP daemon.
 - `docs/architecture.md`: architecture and data model details.
+- `docs/examples/static-auth.example.json`: example bearer-token auth mapping for `loong-memoryd`.
 - `docs/examples/static-policy.example.json`: example JSON policy file for CLI enforcement.
 - `docs/research/onecontext-reverse-engineering.md`: onecontext implementation analysis and extracted design lessons.
 - `docs/research/phase1-evaluation-2026-03-08.md`: deep evaluation, optimization decisions, and verification results.
@@ -74,7 +77,10 @@ cargo run -p loong-memory-cli -- init --db ./loong-memory.db
 # 3) optionally enforce policy with a JSON config
 cp docs/examples/static-policy.example.json ./policy.json
 
-# 4) write memory
+# 4) optionally enable static bearer-token auth for the daemon
+cp docs/examples/static-auth.example.json ./auth.json
+
+# 5) write memory
 cargo run -p loong-memory-cli -- --policy-file ./policy.json put \
   --db ./loong-memory.db \
   --namespace agent-demo \
@@ -83,14 +89,14 @@ cargo run -p loong-memory-cli -- --policy-file ./policy.json put \
   --metadata '{"source":"seed"}' \
   --principal operator
 
-# 5) read memory
+# 6) read memory
 cargo run -p loong-memory-cli -- --policy-file ./policy.json get \
   --db ./loong-memory.db \
   --namespace agent-demo \
   --external-id profile \
   --principal operator
 
-# 6) recall
+# 7) recall
 cargo run -p loong-memory-cli -- --policy-file ./policy.json recall \
   --db ./loong-memory.db \
   --namespace agent-demo \
@@ -98,40 +104,41 @@ cargo run -p loong-memory-cli -- --policy-file ./policy.json recall \
   --limit 3 \
   --principal operator
 
-# 7) audit trail (namespace + principal are required)
+# 8) audit trail (namespace + principal are required)
 cargo run -p loong-memory-cli -- --policy-file ./policy.json audit \
   --db ./loong-memory.db \
   --namespace agent-demo \
   --limit 20 \
   --principal operator
 
-# 8) vector health diagnostics
+# 9) vector health diagnostics
 cargo run -p loong-memory-cli -- --policy-file ./policy.json vector-health \
   --db ./loong-memory.db \
   --namespace agent-demo \
   --invalid-sample-limit 20 \
   --principal operator
 
-# 9) vector repair (dry-run by default, add --apply to write changes)
+# 10) vector repair (dry-run by default, add --apply to write changes)
 cargo run -p loong-memory-cli -- --policy-file ./policy.json vector-repair \
   --db ./loong-memory.db \
   --namespace agent-demo \
   --issue-sample-limit 20 \
   --principal operator
 
-# 10) start the daemon
+# 11) start the daemon in static-token mode
 cargo run -p loong-memoryd -- \
   --db ./loong-memory.db \
   --listen-addr 127.0.0.1:3000 \
-  --policy-file ./policy.json
+  --policy-file ./policy.json \
+  --auth-file ./auth.json
 
-# 11) health check (no principal required)
+# 12) health check (no authentication required)
 curl http://127.0.0.1:3000/healthz
 
-# 12) daemon write
+# 13) daemon write
 curl -X POST http://127.0.0.1:3000/v1/memories \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "external_id": "profile",
@@ -139,53 +146,56 @@ curl -X POST http://127.0.0.1:3000/v1/memories \
     "metadata": {"source": "daemon"}
   }'
 
-# 13) daemon recall
+# 14) daemon recall
 curl -X POST http://127.0.0.1:3000/v1/recall \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "query": "rust sqlite",
     "limit": 3
   }'
 
-# 14) daemon audit read
+# 15) daemon audit read
 curl -X POST http://127.0.0.1:3000/v1/audit \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "limit": 20
   }'
 
-# 15) daemon delete
+# 16) daemon delete
 curl -X DELETE http://127.0.0.1:3000/v1/memories \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "external_id": "profile"
   }'
 
-# 16) daemon vector health
+# 17) daemon vector health
 curl -X POST http://127.0.0.1:3000/v1/vector-health \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "invalid_sample_limit": 20
   }'
 
-# 17) daemon vector repair dry-run
+# 18) daemon vector repair dry-run
 curl -X POST http://127.0.0.1:3000/v1/vector-repair \
   -H 'content-type: application/json' \
-  -H 'x-loong-principal: operator' \
+  -H 'authorization: Bearer operator-secret' \
   -d '{
     "namespace": "agent-demo",
     "issue_sample_limit": 20,
     "apply": false
   }'
 ```
+
+If you omit `--auth-file`, `loong-memoryd` stays in trusted-header mode and
+protected routes continue to require `x-loong-principal`.
 
 ## Verification Gates
 
@@ -204,7 +214,11 @@ cargo test --workspace
 - `loong-memoryd` also defaults to `AllowAllPolicy` when `--policy-file` is omitted.
 - Policy is checked before store access.
 - Static JSON policy files can grant namespace-level and principal+namespace actions.
-- HTTP service routes require `x-loong-principal` on protected operations.
+- `loong-memoryd` uses trusted-header mode when `--auth-file` is omitted.
+- `loong-memoryd` uses static-token mode when `--auth-file` is present and derives
+  the effective principal from `Authorization: Bearer <token>`.
+- Static-token mode ignores caller-supplied `x-loong-principal` for identity derivation.
+- `/healthz` reports `policy_mode` and `auth_mode` without exposing secrets.
 - All actions emit auditable events (allow/deny + operation detail).
 - Audit reads are policy-gated and returned history excludes self-generated audit-read events.
 - Audit persistence surfaces write failures instead of silently dropping events.

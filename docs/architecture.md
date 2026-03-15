@@ -100,11 +100,15 @@ Phase 2 now starts with a minimal HTTP JSON daemon:
 
 Transport behavior:
 
-- protected routes require `x-loong-principal`
+- protected routes use one of two transport-auth modes:
+  - trusted-header mode: require `x-loong-principal`
+  - static-token mode: require `Authorization: Bearer <token>` and derive the
+    effective principal from the configured token mapping
 - request bodies map closely to existing engine request types
 - each request creates a fresh `MemoryEngine` against the configured SQLite path
 - synchronous SQLite/engine work is executed inside `tokio::task::spawn_blocking`
 - errors are mapped into structured HTTP JSON responses
+- `/healthz` reports both `policy_mode` and `auth_mode`
 
 This keeps the daemon thin. The control-plane rules still live in
 `MemoryEngine`, not in the transport handlers.
@@ -134,7 +138,10 @@ This keeps the daemon thin. The control-plane rules still live in
 - CLI can load a JSON `StaticPolicyConfig` via `--policy-file`; without it,
   the CLI preserves current local-operator ergonomics with `AllowAllPolicy`.
 - `loong-memoryd` can load the same JSON `StaticPolicyConfig`; protected routes
-  require `x-loong-principal` so transport requests carry an explicit principal.
+  preserve trusted-header mode by default, or switch to static bearer-token auth
+  via `--auth-file`.
+- In static-token mode, `loong-memoryd` derives the effective principal from the
+  bearer token mapping and ignores caller-supplied `x-loong-principal`.
 - Maintenance operations (`vector_health`, `vector_repair`) are executed through
   engine-level policy checks and audit events, not direct CLI store bypass.
 - Audit reads are namespace-scoped and require `Action::AuditRead`.
@@ -183,9 +190,10 @@ Current integration tests validate:
 - vector repair workflow (`dry-run` planning + transactional `apply`)
 - principal+namespace scoped static policy behavior
 - audit SQLite persistence/filter/limit/error behavior
-- daemon health, readiness failure, principal enforcement, malformed JSON,
-  validation failures, delete, recall, audit, vector health/repair, and deny
-  behavior over HTTP
+- daemon health/readiness behavior including `policy_mode` and `auth_mode`
+- daemon trusted-header enforcement and static bearer-token authentication
+- malformed JSON, validation failures, delete, recall, audit, vector
+  health/repair, deny behavior, and bearer-token spoof-resistance over HTTP
 
 Quality gates:
 
