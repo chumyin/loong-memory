@@ -3,8 +3,8 @@
 ## Summary
 
 This Phase 2 work now delivers both the initial daemon bootstrap and the first
-transport-hardening pass for `loong-memoryd`, the standalone HTTP JSON service
-that reuses the existing engine, policy, and audit contracts.
+transport-auth hardening pass for `loong-memoryd`, the standalone HTTP JSON
+service that reuses the existing engine, policy, and audit contracts.
 
 ## Why This Was the Right Next Step
 
@@ -33,11 +33,16 @@ Handlers delegate to `MemoryEngine` instead of re-implementing validation,
 policy, or audit logic. This keeps the transport layer small and preserves the
 repository's existing trust boundary.
 
-### 3. Explicit Principal Header
+### 3. Optional Static Bearer Auth Envelope
 
-Protected routes require `x-loong-principal`. This is intentionally minimal and
-maps directly onto the existing engine policy model without pretending to be a
-complete authentication solution.
+The daemon now supports two explicit transport-auth modes:
+
+- trusted-header mode when `--auth-file` is omitted
+- static-token mode when `--auth-file` is present
+
+Static-token mode requires `Authorization: Bearer <token>` and derives the
+effective principal from the configured token mapping instead of trusting
+caller-supplied `x-loong-principal`.
 
 ### 4. Per-Request Engine Construction
 
@@ -58,7 +63,7 @@ reactor.
 - `POST /v1/vector-health`
 - `POST /v1/vector-repair`
 - structured HTTP error mapping
-- startup config via `--db`, `--listen-addr`, `--policy-file`
+- startup config via `--db`, `--listen-addr`, `--policy-file`, `--auth-file`
 - service-level negative-path coverage for malformed JSON, validation failure,
   and readiness failure
 - updated repository docs
@@ -74,9 +79,14 @@ Local verification passed:
 Covered HTTP integration behaviors:
 
 - health endpoint does not require a principal
+- health endpoint reports both `policy_mode` and `auth_mode`
 - health endpoint reports readiness failure when the configured DB path cannot
   be opened
-- protected routes reject missing principal headers
+- trusted-header mode rejects missing principal headers
+- static-token mode accepts valid bearer tokens
+- static-token mode rejects missing bearer tokens
+- static-token mode rejects invalid bearer tokens
+- static-token mode ignores spoofed `x-loong-principal` headers
 - malformed JSON returns structured `invalid_json`
 - put/get roundtrip succeeds over the daemon surface
 - delete removes records over HTTP and preserves selector validation
@@ -94,12 +104,13 @@ This is a bootstrap slice, not the full Phase 2 end state. Still missing:
 - gRPC transport
 - SDK clients
 - metrics/tracing export
-- stronger transport authentication and policy reload
+- dynamic auth reload/rotation
+- stronger external identity integration (OIDC, mTLS, or equivalent)
 
 ## Outcome
 
 The repository now has a credible Phase 2 starting point: a real daemon
-boundary, transport-level identity propagation, structured health checks,
+boundary, a real transport authentication envelope, structured health checks,
 maintenance-route coverage, and end-to-end service tests for both happy and
 negative paths. That materially improves delivery completeness over a CLI-only
 Phase 1 story.

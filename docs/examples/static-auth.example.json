@@ -1,0 +1,12 @@
+{
+  "tokens": [
+    {
+      "token": "operator-secret",
+      "principal": "operator"
+    },
+    {
+      "token": "viewer-secret",
+      "principal": "viewer"
+    }
+  ]
+}
