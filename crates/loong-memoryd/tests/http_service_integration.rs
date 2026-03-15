@@ -19,13 +19,22 @@ impl TestServer {
     async fn spawn(policy_file: Option<&Path>) -> Result<Self> {
         let temp_dir = TempDir::new().context("create temp dir")?;
         let db_path = temp_dir.path().join("loong-memory.db");
-        Self::spawn_with_db_path(temp_dir, db_path, policy_file).await
+        Self::spawn_with_security(temp_dir, db_path, policy_file, None).await
     }
 
     async fn spawn_with_db_path(
         temp_dir: TempDir,
         db_path: PathBuf,
         policy_file: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn_with_security(temp_dir, db_path, policy_file, None).await
+    }
+
+    async fn spawn_with_security(
+        temp_dir: TempDir,
+        db_path: PathBuf,
+        policy_file: Option<&Path>,
+        _auth_file: Option<&Path>,
     ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -79,6 +88,7 @@ async fn healthz_returns_ok_without_principal() -> Result<()> {
     assert_eq!(body["status"], "ok");
     assert_eq!(body["service"], "loong-memoryd");
     assert_eq!(body["policy_mode"], "allow_all");
+    assert_eq!(body["auth_mode"], "trusted_header");
     Ok(())
 }
 
@@ -457,5 +467,217 @@ async fn healthz_reports_readiness_failure_for_unopenable_db_path() -> Result<()
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body: Value = response.json().await?;
     assert_eq!(body["error"]["code"], "internal_error");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_token_allows_put_without_principal_header() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let policy_path = temp_dir.path().join("policy.json");
+    let auth_path = temp_dir.path().join("auth.json");
+
+    std::fs::write(
+        &policy_path,
+        serde_json::to_string_pretty(&json!({
+            "principal_namespace_actions": [
+                {
+                    "principal": "operator",
+                    "namespace": "agent-demo",
+                    "actions": ["put", "get", "recall", "delete", "audit_read", "repair"]
+                }
+            ]
+        }))?,
+    )
+    .context("write policy file")?;
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({
+            "tokens": [
+                {
+                    "token": "operator-secret",
+                    "principal": "operator"
+                }
+            ]
+        }))?,
+    )
+    .context("write auth file")?;
+
+    let db_path = temp_dir.path().join("loong-memory.db");
+    let server = TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path)).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("authorization", "Bearer operator-secret")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust",
+            "metadata": {"source": "auth-test"}
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_token_mode_rejects_missing_bearer_token() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let auth_path = temp_dir.path().join("auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({
+            "tokens": [
+                {
+                    "token": "operator-secret",
+                    "principal": "operator"
+                }
+            ]
+        }))?,
+    )
+    .context("write auth file")?;
+
+    let db_path = temp_dir.path().join("loong-memory.db");
+    let server = TestServer::spawn_with_security(temp_dir, db_path, None, Some(&auth_path)).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust",
+            "metadata": {"source": "auth-test"}
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "missing_authentication");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_token_mode_rejects_invalid_bearer_token() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let auth_path = temp_dir.path().join("auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({
+            "tokens": [
+                {
+                    "token": "operator-secret",
+                    "principal": "operator"
+                }
+            ]
+        }))?,
+    )
+    .context("write auth file")?;
+
+    let db_path = temp_dir.path().join("loong-memory.db");
+    let server = TestServer::spawn_with_security(temp_dir, db_path, None, Some(&auth_path)).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("authorization", "Bearer wrong-secret")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust",
+            "metadata": {"source": "auth-test"}
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "invalid_authentication");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_token_mode_ignores_spoofed_principal_header() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let policy_path = temp_dir.path().join("policy.json");
+    let auth_path = temp_dir.path().join("auth.json");
+
+    std::fs::write(
+        &policy_path,
+        serde_json::to_string_pretty(&json!({
+            "principal_namespace_actions": [
+                {
+                    "principal": "operator",
+                    "namespace": "agent-demo",
+                    "actions": ["put", "get", "recall", "delete", "audit_read", "repair"]
+                }
+            ]
+        }))?,
+    )
+    .context("write policy file")?;
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({
+            "tokens": [
+                {
+                    "token": "viewer-secret",
+                    "principal": "viewer"
+                }
+            ]
+        }))?,
+    )
+    .context("write auth file")?;
+
+    let db_path = temp_dir.path().join("loong-memory.db");
+    let server = TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path)).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("authorization", "Bearer viewer-secret")
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust",
+            "metadata": {"source": "auth-test"}
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "policy_denied");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthz_reports_static_token_auth_mode() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let auth_path = temp_dir.path().join("auth.json");
+    std::fs::write(
+        &auth_path,
+        serde_json::to_string_pretty(&json!({
+            "tokens": [
+                {
+                    "token": "operator-secret",
+                    "principal": "operator"
+                }
+            ]
+        }))?,
+    )
+    .context("write auth file")?;
+
+    let db_path = temp_dir.path().join("loong-memory.db");
+    let server = TestServer::spawn_with_security(temp_dir, db_path, None, Some(&auth_path)).await?;
+
+    let response = server.client.get(server.url("/healthz")).send().await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["auth_mode"], "static_token");
     Ok(())
 }
