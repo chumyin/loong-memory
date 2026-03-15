@@ -19,7 +19,14 @@ impl TestServer {
     async fn spawn(policy_file: Option<&Path>) -> Result<Self> {
         let temp_dir = TempDir::new().context("create temp dir")?;
         let db_path = temp_dir.path().join("loong-memory.db");
+        Self::spawn_with_db_path(temp_dir, db_path, policy_file).await
+    }
 
+    async fn spawn_with_db_path(
+        temp_dir: TempDir,
+        db_path: PathBuf,
+        policy_file: Option<&Path>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("bind tcp listener")?;
@@ -240,5 +247,215 @@ async fn static_policy_denial_returns_forbidden() -> Result<()> {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body: Value = response.json().await?;
     assert_eq!(body["error"]["code"], "policy_denied");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_removes_record_over_http() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let put_response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust and sqlite",
+            "metadata": {"source": "seed"}
+        }))
+        .send()
+        .await?;
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let delete_response = server
+        .client
+        .delete(server.url("/v1/memories"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    let body: Value = delete_response.json().await?;
+    assert_eq!(body["ok"], true);
+
+    let get_response = server
+        .client
+        .post(server.url("/v1/memories/get"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile"
+        }))
+        .send()
+        .await?;
+    assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_rejects_invalid_selector() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let delete_response = server
+        .client
+        .delete(server.url("/v1/memories"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "id": "memory-id",
+            "external_id": "profile"
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(delete_response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = delete_response.json().await?;
+    assert_eq!(body["error"]["code"], "validation_failed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vector_health_returns_report_over_http() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let put_response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "external_id": "profile",
+            "content": "Alice likes rust and sqlite",
+            "metadata": {"source": "seed"}
+        }))
+        .send()
+        .await?;
+    assert_eq!(put_response.status(), StatusCode::OK);
+
+    let response = server
+        .client
+        .post(server.url("/v1/vector-health"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "invalid_sample_limit": 5
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["namespace"], "agent-demo");
+    assert_eq!(body["total_rows"], 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vector_repair_returns_dry_run_report_over_http() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/vector-repair"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "issue_sample_limit": 5,
+            "apply": false
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await?;
+    assert_eq!(body["namespace"], "agent-demo");
+    assert_eq!(body["apply"], false);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vector_health_policy_denial_returns_forbidden() -> Result<()> {
+    let temp_dir = TempDir::new().context("create policy temp dir")?;
+    let policy_path = temp_dir.path().join("policy.json");
+    std::fs::write(&policy_path, "{}").context("write policy file")?;
+
+    let server = TestServer::spawn(Some(&policy_path)).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/vector-health"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "invalid_sample_limit": 5
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "policy_denied");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_json_returns_invalid_json_error() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/memories"))
+        .header("x-loong-principal", "operator")
+        .header("content-type", "application/json")
+        .body("{\"namespace\":")
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "invalid_json");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_rejects_invalid_weights_over_http() -> Result<()> {
+    let server = TestServer::spawn(None).await?;
+
+    let response = server
+        .client
+        .post(server.url("/v1/recall"))
+        .header("x-loong-principal", "operator")
+        .json(&json!({
+            "namespace": "agent-demo",
+            "query": "rust sqlite",
+            "limit": 3,
+            "lexical_weight": 0.0,
+            "vector_weight": 0.0
+        }))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "validation_failed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthz_reports_readiness_failure_for_unopenable_db_path() -> Result<()> {
+    let temp_dir = TempDir::new().context("create temp dir")?;
+    let db_path = temp_dir.path().join("missing").join("loong-memory.db");
+    let server = TestServer::spawn_with_db_path(temp_dir, db_path, None).await?;
+
+    let response = server.client.get(server.url("/healthz")).send().await?;
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: Value = response.json().await?;
+    assert_eq!(body["error"]["code"], "internal_error");
     Ok(())
 }

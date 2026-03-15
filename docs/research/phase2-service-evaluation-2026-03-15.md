@@ -2,9 +2,9 @@
 
 ## Summary
 
-This round delivers the first Phase 2 runtime boundary for `loong-memory`:
-`loong-memoryd`, a standalone HTTP JSON daemon that reuses the existing engine,
-policy, and audit contracts.
+This Phase 2 work now delivers both the initial daemon bootstrap and the first
+transport-hardening pass for `loong-memoryd`, the standalone HTTP JSON service
+that reuses the existing engine, policy, and audit contracts.
 
 ## Why This Was the Right Next Step
 
@@ -51,11 +51,16 @@ reactor.
 - `crates/loong-memoryd`
 - `GET /healthz`
 - `POST /v1/memories`
+- `DELETE /v1/memories`
 - `POST /v1/memories/get`
 - `POST /v1/recall`
 - `POST /v1/audit`
+- `POST /v1/vector-health`
+- `POST /v1/vector-repair`
 - structured HTTP error mapping
 - startup config via `--db`, `--listen-addr`, `--policy-file`
+- service-level negative-path coverage for malformed JSON, validation failure,
+  and readiness failure
 - updated repository docs
 
 ## Verification
@@ -69,17 +74,23 @@ Local verification passed:
 Covered HTTP integration behaviors:
 
 - health endpoint does not require a principal
+- health endpoint reports readiness failure when the configured DB path cannot
+  be opened
 - protected routes reject missing principal headers
+- malformed JSON returns structured `invalid_json`
 - put/get roundtrip succeeds over the daemon surface
+- delete removes records over HTTP and preserves selector validation
 - recall returns relevant results over HTTP
+- invalid recall-weight requests return structured validation failures
 - static policy denial returns `403`
 - audit read returns namespace history without self-pollution
+- vector health and vector repair are available over HTTP
+- maintenance-route policy denial is preserved over HTTP
 
 ## Residual Gaps
 
 This is a bootstrap slice, not the full Phase 2 end state. Still missing:
 
-- delete and maintenance HTTP routes
 - gRPC transport
 - SDK clients
 - metrics/tracing export
@@ -88,6 +99,7 @@ This is a bootstrap slice, not the full Phase 2 end state. Still missing:
 ## Outcome
 
 The repository now has a credible Phase 2 starting point: a real daemon
-boundary, transport-level identity propagation, structured health checks, and
-end-to-end service tests. That materially improves delivery completeness over a
-CLI-only Phase 1 story.
+boundary, transport-level identity propagation, structured health checks,
+maintenance-route coverage, and end-to-end service tests for both happy and
+negative paths. That materially improves delivery completeness over a CLI-only
+Phase 1 story.

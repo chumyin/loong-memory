@@ -14,8 +14,9 @@ use axum::{
 };
 use loong_memory_core::{
     AllowAllPolicy, DeterministicHashEmbedder, EmbeddingProvider, EngineConfig, LoongMemoryError,
-    MemoryEngine, MemoryGetRequest, MemoryPutRequest, OperationContext, PolicyEngine,
-    RecallRequest, ScoreWeights, SqliteAuditSink, SqliteStore, StaticPolicy, StaticPolicyConfig,
+    MemoryDeleteRequest, MemoryEngine, MemoryGetRequest, MemoryPutRequest, OperationContext,
+    PolicyEngine, RecallRequest, ScoreWeights, SqliteAuditSink, SqliteStore, StaticPolicy,
+    StaticPolicyConfig,
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -92,6 +93,22 @@ struct AuditRequestBody {
     limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct VectorHealthRequestBody {
+    namespace: String,
+    #[serde(default = "default_invalid_sample_limit")]
+    invalid_sample_limit: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct VectorRepairRequestBody {
+    namespace: String,
+    #[serde(default = "default_issue_sample_limit")]
+    issue_sample_limit: usize,
+    #[serde(default)]
+    apply: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -115,6 +132,11 @@ struct HitsBody {
 #[derive(Debug, Serialize)]
 struct AuditEventsBody {
     events: Vec<loong_memory_core::AuditEvent>,
+}
+
+#[derive(Debug, Serialize)]
+struct OkBody {
+    ok: bool,
 }
 
 #[derive(Debug)]
@@ -207,10 +229,12 @@ impl From<JsonRejection> for ApiError {
 pub fn app(state: ServiceState) -> Router {
     Router::new()
         .route("/healthz", get(health))
-        .route("/v1/memories", post(put_memory))
+        .route("/v1/memories", post(put_memory).delete(delete_memory))
         .route("/v1/memories/get", post(get_memory))
         .route("/v1/recall", post(recall))
         .route("/v1/audit", post(audit))
+        .route("/v1/vector-health", post(vector_health))
+        .route("/v1/vector-repair", post(vector_repair))
         .with_state(state)
 }
 
@@ -273,6 +297,20 @@ async fn get_memory(
     Ok(Json(record))
 }
 
+async fn delete_memory(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    body: Result<Json<MemoryDeleteRequest>, JsonRejection>,
+) -> Result<Json<OkBody>, ApiError> {
+    let principal = extract_principal(&headers)?;
+    let Json(req) = body.map_err(ApiError::from)?;
+    with_engine(state, principal, move |engine, ctx| {
+        engine.delete(&ctx, &req)
+    })
+    .await?;
+    Ok(Json(OkBody { ok: true }))
+}
+
 async fn recall(
     State(state): State<ServiceState>,
     headers: HeaderMap,
@@ -314,6 +352,34 @@ async fn audit(
     }))
 }
 
+async fn vector_health(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    body: Result<Json<VectorHealthRequestBody>, JsonRejection>,
+) -> Result<Json<loong_memory_core::VectorHealthReport>, ApiError> {
+    let principal = extract_principal(&headers)?;
+    let Json(req) = body.map_err(ApiError::from)?;
+    let report = with_engine(state, principal, move |engine, ctx| {
+        engine.vector_health(&ctx, &req.namespace, req.invalid_sample_limit)
+    })
+    .await?;
+    Ok(Json(report))
+}
+
+async fn vector_repair(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    body: Result<Json<VectorRepairRequestBody>, JsonRejection>,
+) -> Result<Json<loong_memory_core::VectorRepairReport>, ApiError> {
+    let principal = extract_principal(&headers)?;
+    let Json(req) = body.map_err(ApiError::from)?;
+    let report = with_engine(state, principal, move |engine, ctx| {
+        engine.vector_repair(&ctx, &req.namespace, req.issue_sample_limit, req.apply)
+    })
+    .await?;
+    Ok(Json(report))
+}
+
 fn default_recall_limit() -> usize {
     5
 }
@@ -328,6 +394,14 @@ fn default_vector_weight() -> f32 {
 
 fn default_audit_limit() -> usize {
     50
+}
+
+fn default_invalid_sample_limit() -> usize {
+    20
+}
+
+fn default_issue_sample_limit() -> usize {
+    20
 }
 
 fn extract_principal(headers: &HeaderMap) -> Result<String, ApiError> {
