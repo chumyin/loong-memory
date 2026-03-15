@@ -18,6 +18,8 @@ struct Cli {
     listen_addr: SocketAddr,
     #[arg(long)]
     policy_file: Option<PathBuf>,
+    #[arg(long)]
+    auth_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -26,7 +28,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let cli = Cli::parse();
-    let config = ServiceConfig::new(cli.db.clone(), cli.policy_file.clone());
+    let config = ServiceConfig::new(
+        cli.db.clone(),
+        cli.policy_file.clone(),
+        cli.auth_file.clone(),
+    );
     let state = ServiceState::from_config(&config).context("build loong-memoryd state")?;
     let listener = TcpListener::bind(cli.listen_addr)
         .await

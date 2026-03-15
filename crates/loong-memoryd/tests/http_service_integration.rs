@@ -34,7 +34,7 @@ impl TestServer {
         temp_dir: TempDir,
         db_path: PathBuf,
         policy_file: Option<&Path>,
-        _auth_file: Option<&Path>,
+        auth_file: Option<&Path>,
     ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -42,7 +42,11 @@ impl TestServer {
         let address = listener.local_addr().context("read listener address")?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
-        let config = ServiceConfig::new(db_path, policy_file.map(PathBuf::from));
+        let config = ServiceConfig::new(
+            db_path,
+            policy_file.map(PathBuf::from),
+            auth_file.map(PathBuf::from),
+        );
         let state = ServiceState::from_config(&config)?;
 
         let join_handle = tokio::spawn(async move {
@@ -503,7 +507,9 @@ async fn bearer_token_allows_put_without_principal_header() -> Result<()> {
     .context("write auth file")?;
 
     let db_path = temp_dir.path().join("loong-memory.db");
-    let server = TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path)).await?;
+    let server =
+        TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path))
+            .await?;
 
     let response = server
         .client
@@ -632,7 +638,9 @@ async fn static_token_mode_ignores_spoofed_principal_header() -> Result<()> {
     .context("write auth file")?;
 
     let db_path = temp_dir.path().join("loong-memory.db");
-    let server = TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path)).await?;
+    let server =
+        TestServer::spawn_with_security(temp_dir, db_path, Some(&policy_path), Some(&auth_path))
+            .await?;
 
     let response = server
         .client
